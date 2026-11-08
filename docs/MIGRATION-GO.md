@@ -8,7 +8,7 @@ Working plan, removed with the Python server (lot 7).
 | 1 | Config, accounts, friends, HTTP, `accounts` and `ops` commands | done |
 | 2 | PRUDP, RMC, Kerberos, auth and secure servers | done |
 | 3 | Matchmaking, NAT check, notifications, probes | done |
-| 4 | Integrity and moderation on the NEX path, limits, load | to do |
+| 4 | Integrity and moderation on the NEX path, limits, load | done |
 | 5 | Real-game test, deployment rehearsal | to do |
 | 6 | Parallel run on the VPS, then cutover (rollback: restart Python, same database) | to do |
 | 7 | Remove Python, short README, secret scan of the history, go public | to do |

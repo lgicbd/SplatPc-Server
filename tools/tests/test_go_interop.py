@@ -38,6 +38,8 @@ SESSION_CLOSED = 0x800300DB
 INVALID_USERNAME = 0x80030064
 NOT_IMPLEMENTED = 0x80010002
 ADMIN_TOKEN = "interop-admin-token"
+INTEGRITY_VERSION = "0.1.3"
+OFFICIAL_RELEASE = "ef" * 32
 TEST_TIMEOUT = 60
 MAX_LOGINS_PER_IP = 60
 MAX_CONNECTIONS_PER_IP = 32
@@ -85,7 +87,7 @@ class ProbeSink(nattraversal.NATTraversalServer):
 class InteropTests(unittest.IsolatedAsyncioTestCase):
     @contextlib.asynccontextmanager
     async def server(self, mode="lab", pids=(PID_A, PID_B), natcheck=None, fill_timeout=None, idle_timeout=None,
-                     test_timeout=TEST_TIMEOUT):
+                     test_timeout=TEST_TIMEOUT, extra=None):
         """A server process, its identities or accounts, and an exit stack for the fake players."""
         WORK.mkdir(parents=True, exist_ok=True)
         tag = secrets.token_hex(4)
@@ -115,6 +117,7 @@ class InteropTests(unittest.IsolatedAsyncioTestCase):
             command += ["--identity-root", str(WORK / "no-such-root")]
         if fill_timeout:
             config["fill_timeout"] = fill_timeout
+        config.update(extra or {})
         config_path = WORK / f"interop-{tag}.json"
         config_path.write_text(json.dumps(config), encoding="utf-8")
         log = WORK / f"interop-{tag}.log"
@@ -176,6 +179,26 @@ class InteropTests(unittest.IsolatedAsyncioTestCase):
 
     async def admin(self, path):
         return await asyncio.to_thread(self.get, path)
+
+    def send(self, path, body, token=None):
+        """POST a JSON body; returns (status, JSON answer), error statuses included."""
+        request = urllib.request.Request(f"http://{HOST}:{self.http}{path}", data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json"})
+        if token:
+            request.add_header("Authorization", f"Bearer {token}")
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read())
+
+    async def post(self, path, body, token=None):
+        return await asyncio.to_thread(self.send, path, body, token)
+
+    async def open_social_session(self, pid, release):
+        """The sign-in the launcher does before playing: it carries the proof of an official release."""
+        return await self.post("/social/session", {"pid": f"0x{pid:x}", "password": password_for(pid),
+                                                   "client": {"version": INTEGRITY_VERSION, "code": release}})
 
     async def test_login_ticket_and_register(self):
         async with self.server():
@@ -379,6 +402,76 @@ class InteropTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.05)
             self.assertEqual(sessions["players"], [])
             self.assertEqual(sessions["sessions"], [])
+
+    async def test_integrity_enforce_gates_the_nex_login(self):
+        extra = {"integrity_mode": "enforce", "integrity_releases": {INTEGRITY_VERSION: OFFICIAL_RELEASE}}
+        async with self.server(mode="public", extra=extra):
+            self.assertEqual(await self.refusal(PID_A), INVALID_USERNAME)          # no proof yet
+            status, _ = await self.open_social_session(PID_A, "00" * 32)
+            self.assertEqual(status, 426)                                         # a hash that is not listed
+            self.assertEqual(await self.refusal(PID_A), INVALID_USERNAME)
+            status, answer = await self.open_social_session(PID_A, OFFICIAL_RELEASE)
+            self.assertEqual(status, 200)
+            self.assertTrue(answer["token"])
+            a = await self.player(PID_A, local_host="127.0.0.2")
+            self.assertEqual(a.login_response.pid, PID_A)
+            health = await asyncio.to_thread(self.get, "/health", None)
+            self.assertEqual((health["integrity_mode"], health["latest_version"]), ("enforce", INTEGRITY_VERSION))
+
+    async def test_integrity_log_mode_lets_everyone_in(self):
+        extra = {"integrity_mode": "log", "integrity_releases": {INTEGRITY_VERSION: OFFICIAL_RELEASE}}
+        async with self.server(mode="public", extra=extra):
+            a = await self.player(PID_A, local_host="127.0.0.2")
+            self.assertEqual(a.login_response.pid, PID_A)
+            status, _ = await self.open_social_session(PID_B, "00" * 32)           # logged, not refused
+            self.assertEqual(status, 200)
+
+    async def test_ban_by_pid_kicks_refuses_and_is_logged(self):
+        extra = {"integrity_mode": "enforce", "integrity_releases": {INTEGRITY_VERSION: OFFICIAL_RELEASE}}
+        async with self.server(mode="public", extra=extra):
+            await self.open_social_session(PID_A, OFFICIAL_RELEASE)
+            a = await self.player(PID_A, local_host="127.0.0.2")
+            await a.extension.auto_matchmake_with_param_postpone(auto_param())
+            status, _ = await self.post("/admin/ban", {"pid": f"0x{PID_A:x}", "reason": "cheating", "hours": 1},
+                                        ADMIN_TOKEN)
+            self.assertEqual(status, 200)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:                                     # the ban kicks the player
+                sessions = await self.admin("/admin/sessions")
+                if not sessions["players"]:
+                    break
+                await asyncio.sleep(0.05)
+            self.assertEqual(sessions["players"], [])
+            status, _ = await self.open_social_session(PID_A, OFFICIAL_RELEASE)
+            self.assertEqual(status, 403)                                         # banned: no new sign-in
+            self.assertEqual(await self.refusal(PID_A), INVALID_USERNAME)
+            bans = await self.admin("/admin/bans")
+            self.assertIn(f"{PID_A:08x}", json.dumps(bans))
+            self.assertIn("cheating", json.dumps(await self.admin("/admin/log")))
+            status, _ = await self.post("/admin/unban", {"pid": f"0x{PID_A:x}"}, ADMIN_TOKEN)
+            self.assertEqual(status, 200)
+            self.assertEqual(await self.refusal(PID_A), INVALID_USERNAME)          # the proof was revoked by the ban
+            await self.open_social_session(PID_A, OFFICIAL_RELEASE)
+            self.assertEqual((await self.player(PID_A, local_host="127.0.0.2")).login_response.pid, PID_A)
+
+    async def test_ban_by_address_only_refuses_that_address(self):
+        async with self.server(mode="public"):
+            status, _ = await self.post("/admin/ban", {"ip": "127.0.0.2", "reason": "abuse", "hours": 1}, ADMIN_TOKEN)
+            self.assertEqual(status, 200)
+            with self.assertRaises(Exception) as caught:
+                await self.player(PID_A, local_host="127.0.0.2")
+            self.assertIsNotNone(find_exception(caught.exception, common.RMCError))
+            b = await self.player(PID_B, local_host="127.0.0.3")
+            self.assertEqual(b.login_response.pid, PID_B)
+
+    async def test_admin_requires_the_token_and_health_shows_the_minimum_version(self):
+        async with self.server(mode="public", extra={"min_client_version": "0.1.2"}):
+            status, _ = await self.post("/admin/ban", {"pid": f"0x{PID_A:x}"})
+            self.assertEqual(status, 401)
+            status, _ = await self.post("/admin/ban", {"pid": f"0x{PID_A:x}"}, "wrong-token")
+            self.assertEqual(status, 401)
+            health = await asyncio.to_thread(self.get, "/health", None)
+            self.assertEqual(health["min_client_version"], "0.1.2")
 
     async def test_host_leaving_ends_the_session(self):
         async with self.server():
