@@ -28,6 +28,9 @@ func NewReader(data []byte, structHeader bool) *Reader {
 func (r *Reader) Err() error     { return r.err }
 func (r *Reader) Remaining() int { return len(r.data) - r.pos }
 
+// Rest returns the unread bytes without consuming them.
+func (r *Reader) Rest() []byte { return r.data[r.pos:] }
+
 // Fail marks the data as invalid.
 func (r *Reader) Fail() { r.err = ErrShort }
 

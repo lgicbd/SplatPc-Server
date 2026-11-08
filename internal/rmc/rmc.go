@@ -28,6 +28,8 @@ const (
 	requestFlag  = 0x80
 	responseFlag = 0x8000
 	extendedID   = 0x7F
+
+	maxLoggedParams = 256 // of a request a handler could not read
 )
 
 // Error is a refusal a handler sends back to the caller.
@@ -136,6 +138,7 @@ func (c *Conn) call(protocol uint16, method uint32, in *nexstream.Reader, out *n
 			code = CoreException
 		}
 	}()
+	params := in.Rest()
 	err := handler(c, in, out)
 	var refused *Error
 	switch {
@@ -144,7 +147,7 @@ func (c *Conn) call(protocol uint16, method uint32, in *nexstream.Reader, out *n
 	case errors.As(err, &refused):
 		return refused.Code
 	default:
-		logx.Warnf("RMC protocol=%d method=%d from %s: %v", protocol, method, c.RemoteAddr(), err)
+		logx.Warnf("RMC protocol=%d method=%d from %s: %v params=%x", protocol, method, c.RemoteAddr(), err, params[:min(len(params), maxLoggedParams)])
 		failures.Add(1)
 		return CoreException
 	}

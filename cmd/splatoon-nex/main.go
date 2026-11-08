@@ -44,6 +44,7 @@ type serverFlags struct {
 	log     string
 	debug   bool
 	seconds float64
+	check   bool
 }
 
 func parseServerFlags(args []string, stderr io.Writer) (*serverFlags, error) {
@@ -76,6 +77,7 @@ func parseServerFlags(args []string, stderr io.Writer) (*serverFlags, error) {
 	fs.StringVar(&parsed.log, "log", "nexserver.log", "log file")
 	fs.Float64Var(&parsed.seconds, "seconds", 0, "stop after this long (tests)")
 	fs.BoolVar(&parsed.debug, "debug", false, "verbose log")
+	fs.BoolVar(&parsed.check, "check-config", false, "validate the configuration and exit, without binding anything")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -143,6 +145,10 @@ func runServer(args []string, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 2
+	}
+	if flags.check {
+		fmt.Fprintln(stderr, cfg.Describe())
+		return 0
 	}
 	if err := logx.Setup(flags.log, flags.debug); err != nil {
 		fmt.Fprintln(stderr, err)
