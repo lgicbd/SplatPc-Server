@@ -1,0 +1,21 @@
+# systemd unit for the NEX server. Install: see deploy/README.md.
+# Paths follow the layout used by deploy_server.py (--remote-root /opt/splatoon).
+[Unit]
+Description=Splatoon PC NEX server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=splatoon
+Group=splatoon
+WorkingDirectory=/opt/splatoon
+ExecStart=/opt/splatoon/venv/bin/python /opt/splatoon/tools/nexlab/nexserver.py --config /opt/splatoon/server.json --log /var/log/splatoon/nexserver.log
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/splatoon /var/log/splatoon
+
+[Install]
+WantedBy=multi-user.target

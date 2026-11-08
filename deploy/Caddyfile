@@ -1,0 +1,8 @@
+# HTTPS in front of the sign-up and friends endpoints; Caddy gets the certificate by itself.
+# Run with your domain in the environment:  SPLATOON_DOMAIN=your-domain.example caddy run --config deploy/Caddyfile
+# Only these paths reach the server; the admin routes (/admin/*) stay closed from outside.
+{$SPLATOON_DOMAIN} {
+	@ok path /register /health /social/*
+	reverse_proxy @ok 127.0.0.1:60002
+	respond 404
+}
