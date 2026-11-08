@@ -10,3 +10,6 @@ server.json
 __pycache__/
 *.pyc
 .venv/
+/splatoon-nex
+/splatoon-nex.exe
+/bin/
