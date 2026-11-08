@@ -13,3 +13,6 @@ __pycache__/
 /splatoon-nex
 /splatoon-nex.exe
 /bin/
+
+# Test output
+/build/
