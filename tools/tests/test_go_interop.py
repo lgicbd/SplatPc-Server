@@ -515,6 +515,27 @@ class InteropTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0.02)
             self.assertEqual(sink.stations[0]["port"], 4242)
 
+    async def test_probe_station_without_scheme_is_refused_and_the_connection_survives(self):
+        # The real game sends this station on its first probe when its local and public addresses match.
+        async with self.server(mode="public"):
+            a = await self.player(PID_A, local_host="127.0.0.2")
+            b = await self.player(PID_B, local_host="127.0.0.3")
+            sink = ProbeSink()
+            a.client.register_server(sink)
+            await a.extension.auto_matchmake_with_param_postpone(auto_param())
+            await b.extension.auto_matchmake_with_param_postpone(auto_param())
+            nat = nattraversal.NATTraversalClient(b.client)
+            target = common.StationURL("prudp", PID=PID_A, RVCID=a.register_response.connection_id)
+            no_scheme = common.StationURL("", port=49211, PID=PID_B, RVCID=4098, probeinit=1, type=0)
+            self.assertNotIn(":/", str(no_scheme))
+            with self.assertRaises(common.RMCError):
+                await nat.request_probe_initiation_ext([target], no_scheme)
+            await nat.request_probe_initiation_ext([target], common.StationURL("prudp", address="127.0.0.3", port=4242))
+            deadline = time.monotonic() + 3
+            while not sink.stations and time.monotonic() < deadline:
+                await asyncio.sleep(0.02)
+            self.assertEqual(sink.stations[0]["port"], 4242)
+
     async def test_natcheck_answers_and_gives_the_peer_port(self):
         addresses = ["127.0.0.4", "127.0.0.5"]        # lab: public mode refuses loopback addresses
         async with self.server(natcheck=addresses):

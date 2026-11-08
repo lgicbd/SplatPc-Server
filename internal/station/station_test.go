@@ -26,7 +26,9 @@ func TestEmptyIsAnEmptyPrudpURL(t *testing.T) {
 }
 
 func TestInvalidURLs(t *testing.T) {
-	for _, text := range []string{"nothing", "a:/b:/c=1", "a:/b", "a:/b=1=2", "a:/b=1;"} {
+	// The last one is real: the game sends it when its local and public addresses are the same.
+	gameWithoutScheme := "port=49211;CID=0;PID=12345;RVCID=4098;natf=0;natm=0;probeinit=1;sid=0;stream=0;type=0"
+	for _, text := range []string{"nothing", "a:/b:/c=1", "a:/b", "a:/b=1=2", "a:/b=1;", gameWithoutScheme} {
 		if _, err := Parse(text); err == nil {
 			t.Fatalf("%q accepted", text)
 		}
