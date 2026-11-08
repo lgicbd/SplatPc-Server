@@ -1,0 +1,12 @@
+# Runtime data and secrets: never commit
+server.json
+*.sqlite3
+*.sqlite3-*
+*.log
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.pyc
+.venv/
