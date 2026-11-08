@@ -1,0 +1,22 @@
+# systemd unit for the Go NEX server. Installed by deploy/deploy_go.py, see deploy/README.md.
+# go/server.json is the parallel configuration, or a link to ../server.json once the Go server is live.
+[Unit]
+Description=Splatoon NEX server, Go (matchmaking, NAT check)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=splatoon
+Group=splatoon
+WorkingDirectory=/opt/splatoon/go
+ExecStart=/opt/splatoon/go/splatoon-nex --config /opt/splatoon/go/server.json --log /var/log/splatoon/nexserver-go.log
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/splatoon /var/log/splatoon
+
+[Install]
+WantedBy=multi-user.target

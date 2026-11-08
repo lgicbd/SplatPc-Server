@@ -1,13 +1,14 @@
-"""Local rehearsal of a server update (no network beyond this PC): run it before deploy_server.py --apply.
+"""Local rehearsal of the move from Python to Go (no network beyond this PC): run it before deploy_go.py --apply.
 
-    py -3 deploy/rehearsal.py --old-rev <git revision of the code the server runs now> [--lan <this PC address>] [--panel-py panel.py]
+    py -3.12 deploy/rehearsal.py --old-rev <git revision of the Python code the server runs now> [--lan <this PC address>] [--panel-py panel.py]
 
-1. A fake server folder with the code of --old-rev and a database made by that code (accounts, a pseudo, a ban).
-2. Same steps as deploy_server.py --apply: online SQLite backup, new files (git HEAD), server.json gets the integrity keys,
-   the new code loads it, the server starts in public mode on this PC (other ports, NAT check off).
-3. Checks over HTTP: /health, a 0.1.3 relay sign-in (no proof) is still accepted in "log" mode and logged, a proof is
-   accepted, ops.py ban/bans/log/unban, the admin panel helper (optional, status, ban, unban) against this server.
-4. Rollback: the old code starts again on the migrated database and still signs players in.
+1. A fake server folder with the Python code of --old-rev and a database made by that code (accounts, a pseudo, a ban).
+2. Parallel run, as deploy_go.py parallel: Go on a copy of the database and other ports while Python keeps running.
+3. Cutover, as deploy_go.py cutover: online SQLite backup, server.json gets the integrity keys, the binary validates it,
+   Python stops and Go starts in public mode on the same database (other ports than production, NAT check off).
+4. Checks over HTTP: /health, a 0.1.3 relay sign-in (no proof) is still accepted in "log" mode and logged, a proof is
+   accepted, ops ban/bans/log/unban, the admin panel helper (optional, status, ban, unban) against this server.
+5. Rollback: Python starts again on the database Go wrote and still signs players in.
 """
 import argparse
 import base64
@@ -44,8 +45,10 @@ def lan_address():
 
 LAN = ARGS.lan or lan_address()
 FILES = sorted(pathlib.PurePosixPath(p).name for p in subprocess.run(
-    ["git", "-C", str(ROOT), "ls-files", "tools/nexlab/*.py"], capture_output=True, text=True, check=True).stdout.split())
+    ["git", "-C", str(ROOT), "ls-tree", "--name-only", OLD, "tools/nexlab/"], capture_output=True, text=True, check=True).stdout.split() if p.endswith(".py"))
 PORT, REG = 61000, 61002
+PARALLEL_PORT, PARALLEL_REG = 61010, 61012
+BINARY = WORK / ("splatoon-nex.exe" if sys.platform == "win32" else "splatoon-nex")
 ADMIN = secrets.token_hex(16)
 results = []
 
@@ -62,11 +65,11 @@ def put_code(rev, target):
         (target / name).write_bytes(data)
 
 
-def call(path, body=None, token=None):
+def call(path, body=None, token=None, port=REG):
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(f"http://127.0.0.1:{REG}{path}", data=None if body is None else json.dumps(body).encode(), headers=headers)
+    request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=None if body is None else json.dumps(body).encode(), headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=5) as reply:
             return reply.status, json.loads(reply.read() or b"{}")
@@ -74,18 +77,31 @@ def call(path, body=None, token=None):
         return error.code, json.loads(error.read() or b"{}")
 
 
-def start(code_dir, config, log):
-    proc = subprocess.Popen([sys.executable, str(code_dir / "nexserver.py"), "--config", str(config), "--log", str(log)],
-                            cwd=str(code_dir), stdout=subprocess.DEVNULL, stderr=open(str(log) + ".stderr", "w"))
+def start(command, cwd, log, port=REG):
+    proc = subprocess.Popen([*command, "--log", str(log)], cwd=str(cwd), stdout=subprocess.DEVNULL, stderr=open(str(log) + ".stderr", "w"))
     for _ in range(40):
         time.sleep(0.25)
         try:
-            if call("/health")[0] == 200:
+            if call("/health", port=port)[0] == 200:
                 return proc
         except Exception:
             pass
     proc.kill()
     sys.exit("server did not start: " + pathlib.Path(str(log) + ".stderr").read_text()[-1500:])
+
+
+def start_python(code_dir, config, log):
+    return start([sys.executable, str(code_dir / "nexserver.py"), "--config", str(config)], code_dir, log)
+
+
+def start_go(config, log, port=REG):
+    return start([str(BINARY), "--config", str(config)], WORK, log, port)
+
+
+def online_backup(source_path, target_path):
+    source, target = sqlite3.connect(str(source_path)), sqlite3.connect(str(target_path))
+    source.backup(target)
+    target.close(), source.close()
 
 
 def stop(proc):
@@ -109,37 +125,48 @@ config_path.write_text(json.dumps(config, indent=1))
 
 # 1. The 0.1.3 server and its database.
 players = {0x10000001: "A" * 16, 0x10000002: "B" * 16}
-old = start(code, config_path, WORK / "old.log")
+old = start_python(code, config_path, WORK / "old.log")
 for pid, password in players.items():
     status, _ = call("/register", {"pid": f"0x{pid:08x}", "password": password})
     check(f"old server registers {pid:08x}", status == 200, status)
 check("old server claims a pseudo", call("/social/pseudo", {"pid": "0x10000001", "password": players[0x10000001], "pseudo": "Alice"})[0] == 200)
-stop(old)
 subprocess.run([sys.executable, str(code / "accounts.py"), "--db", str(db), "ban", "--pid", "0x10000002", "--reason", "old ban"],
                cwd=str(code), check=True, capture_output=True)
 
-# 2. Deployment steps.
+# 2. Parallel run: Go on a copy, Python still running on the live database.
+subprocess.run(["go", "build", "-o", str(BINARY), "./cmd/splatoon-nex"], cwd=str(ROOT), check=True)
+parallel_db = WORK / "accounts-go-parallel.sqlite3"
+online_backup(db, parallel_db)
+parallel_config = WORK / "server.parallel.json"
+parallel_config.write_text(json.dumps({**config, "auth_port": PARALLEL_PORT, "secure_port": PARALLEL_PORT + 1,
+                                       "registration_port": PARALLEL_REG, "accounts_db": str(parallel_db)}, indent=1))
+parallel = start_go(parallel_config, WORK / "parallel.log", PARALLEL_REG)
+check("parallel Go answers next to Python", call("/health", port=PARALLEL_REG)[0] == 200 and call("/health")[0] == 200)
+check("parallel Go signs in a player of the copy",
+      call("/social/session", {"pid": "0x10000001", "password": players[0x10000001]}, port=PARALLEL_REG)[0] == 200)
+check("parallel Go registers on its copy only", call("/register", {"pid": "0x10000003", "password": "C" * 16}, port=PARALLEL_REG)[0] == 200
+      and sqlite3.connect(str(db)).execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 2)
+check("Python still signs in during the parallel run", call("/social/session", {"pid": "0x10000001", "password": players[0x10000001]})[0] == 200)
+stop(parallel)
+
+# 3. Cutover.
 backup = WORK / "accounts.sqlite3.bak"
-source, target = sqlite3.connect(str(db)), sqlite3.connect(str(backup))
-source.backup(target)
-target.close(), source.close()
+online_backup(db, backup)
 check("database backup readable", sqlite3.connect(str(backup)).execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 2)
-shutil.copytree(code, WORK / "tools.bak-nexlab")
 shutil.copy2(config_path, WORK / "server.json.bak")
-put_code("HEAD", code)
 edited = json.loads(config_path.read_text())
 edited.setdefault("integrity_mode", "log")
 edited.setdefault("integrity_releases", {})
 config_path.write_text(json.dumps(edited, indent=1))
-loaded = subprocess.run([sys.executable, "-c", f"import server_config; print(server_config.ServerConfig.load(r'{config_path}').integrity_mode)"],
-                        cwd=str(code), capture_output=True, text=True)
-check("new code loads the edited server.json", loaded.stdout.strip() == "log", loaded.stderr[-300:])
-new = start(code, config_path, WORK / "new.log")
+loaded = subprocess.run([str(BINARY), "--config", str(config_path), "--check-config"], capture_output=True, text=True)
+check("the binary validates the edited server.json", loaded.returncode == 0 and "mode=public" in loaded.stderr, loaded.stderr[-300:])
+stop(old)
+new = start_go(config_path, WORK / "new.log")
 columns = [r[1] for r in sqlite3.connect(str(db)).execute("PRAGMA table_info(bans)")]
-check("migration added bans.expires", "expires" in columns, columns)
-check("migration added mod_log", sqlite3.connect(str(db)).execute("SELECT name FROM sqlite_master WHERE name='mod_log'").fetchone() is not None)
+check("database has bans.expires", "expires" in columns, columns)
+check("database has mod_log", sqlite3.connect(str(db)).execute("SELECT name FROM sqlite_master WHERE name='mod_log'").fetchone() is not None)
 
-# 3. Checks.
+# 4. Checks.
 check("/health", call("/health")[0] == 200)
 status, answer = call("/social/session", {"pid": "0x10000001", "password": players[0x10000001]})
 check("0.1.3 relay (no proof) still signs in with integrity_mode log", status == 200 and answer.get("token"), (status, answer))
@@ -149,7 +176,7 @@ status, _ = call("/social/session", {"pid": "0x10000001", "password": players[0x
 check("unknown proof still signs in (log mode)", status == 200, status)
 check("old ban still applies", call("/social/session", {"pid": "0x10000002", "password": players[0x10000002]})[0] == 403)
 check("old ban listed by the new code", any(b["pid"] == "10000002" for b in call("/admin/bans", token=ADMIN)[1].get("bans", [])))
-ops = [sys.executable, str(code / "ops.py"), "--url", f"http://127.0.0.1:{REG}", "--token", ADMIN]
+ops = [str(BINARY), "ops", "--url", f"http://127.0.0.1:{REG}", "--token", ADMIN]
 check("ops ban 1 h", subprocess.run(ops + ["ban", "--pid", "0x10000001", "--hours", "1", "--reason", "rehearsal"], capture_output=True).returncode == 0)
 check("banned player refused", call("/social/session", {"pid": "0x10000001", "password": players[0x10000001]})[0] == 403)
 log = call("/admin/log", token=ADMIN)[1].get("log", [])
@@ -177,13 +204,12 @@ if ARGS.panel_py:
     check("panel unban", panel("unban", base64.b64encode(json.dumps({"pid": "0x10000001"}).encode()).decode()).get("ok") is True)
 stop(new)
 
-# 4. Rollback on the migrated database.
-shutil.rmtree(code)
-shutil.copytree(WORK / "tools.bak-nexlab", code)
+# 5. Rollback: Python on the database Go wrote.
 shutil.copy2(WORK / "server.json.bak", config_path)
-old = start(code, config_path, WORK / "rollback.log")
-check("old code runs on the migrated database", call("/social/session", {"pid": "0x10000001", "password": players[0x10000001]})[0] == 200)
-check("old code still sees the old ban", call("/social/session", {"pid": "0x10000002", "password": players[0x10000002]})[0] == 403)
+old = start_python(code, config_path, WORK / "rollback.log")
+check("Python runs on the database Go wrote", call("/social/session", {"pid": "0x10000001", "password": players[0x10000001]})[0] == 200)
+check("Python still sees the old ban", call("/social/session", {"pid": "0x10000002", "password": players[0x10000002]})[0] == 403)
+check("Python sees the moderation log Go wrote", any("rehearsal" in entry["detail"] for entry in call("/admin/log", token=ADMIN)[1].get("log", [])))
 stop(old)
 
 failed = [n for n, ok in results if not ok]
