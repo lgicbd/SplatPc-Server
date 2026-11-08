@@ -11,7 +11,7 @@ copy tools\nexlab\server.example.json server.json
 py -3.12 tools\nexlab\nexserver.py --config server.json
 ```
 
-Full guide: [docs/SERVEUR.md](docs/SERVEUR.md).
+Full guide: [docs/SERVEUR.md](docs/SERVEUR.md) ([français](docs/SERVEUR.fr.md)). Deploying and updating on a Linux machine: [deploy/](deploy/README.md).
 
 ## Test
 
