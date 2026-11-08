@@ -13,6 +13,7 @@ import contextlib
 import json
 import os
 import pathlib
+import random
 import secrets
 import socket
 import struct
@@ -23,7 +24,7 @@ import unittest
 import urllib.error
 import urllib.request
 
-from nintendo.nex import common, matchmaking, nattraversal, secure
+from nintendo.nex import authentication, common, matchmaking, nattraversal, rmc, secure
 from tools.nexlab import accounts as account_store
 from tools.tests.test_server_e2e import (FakePlayer, HOST, NOTIFICATION_JOINED, PIA_PORT, PID_A, PID_B, auto_param,
                                          free_ports, free_tcp_port, password_for, write_identity)
@@ -38,6 +39,10 @@ INVALID_USERNAME = 0x80030064
 NOT_IMPLEMENTED = 0x80010002
 ADMIN_TOKEN = "interop-admin-token"
 TEST_TIMEOUT = 60
+MAX_LOGINS_PER_IP = 60
+MAX_CONNECTIONS_PER_IP = 32
+LOAD_PLAYERS = 100
+LOAD_WAVE = 6
 _built = False
 
 
@@ -79,7 +84,8 @@ class ProbeSink(nattraversal.NATTraversalServer):
 
 class InteropTests(unittest.IsolatedAsyncioTestCase):
     @contextlib.asynccontextmanager
-    async def server(self, mode="lab", pids=(PID_A, PID_B), natcheck=None, fill_timeout=None):
+    async def server(self, mode="lab", pids=(PID_A, PID_B), natcheck=None, fill_timeout=None, idle_timeout=None,
+                     test_timeout=TEST_TIMEOUT):
         """A server process, its identities or accounts, and an exit stack for the fake players."""
         WORK.mkdir(parents=True, exist_ok=True)
         tag = secrets.token_hex(4)
@@ -115,13 +121,16 @@ class InteropTests(unittest.IsolatedAsyncioTestCase):
         errors = WORK / f"interop-{tag}.stderr"
         paths += [config_path, log, errors]
         # A file, not a pipe: nobody reads a pipe during the test, and a full one blocks the server's logging.
+        environment = dict(os.environ)
+        if idle_timeout:
+            environment["NEXLAB_IDLE_TIMEOUT"] = str(idle_timeout)
         with errors.open("wb") as stderr:
             process = subprocess.Popen(command + ["--config", str(config_path), "--log", str(log)], cwd=ROOT,
-                                       stdout=subprocess.DEVNULL, stderr=stderr)
+                                       env=environment, stdout=subprocess.DEVNULL, stderr=stderr)
         self.log_path = log
         try:
             await self.wait_ready(process, log, errors)
-            async with asyncio.timeout(TEST_TIMEOUT), contextlib.AsyncExitStack() as stack:
+            async with asyncio.timeout(test_timeout), contextlib.AsyncExitStack() as stack:
                 self.stack = stack
                 yield
         finally:
@@ -188,11 +197,10 @@ class InteropTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_usernames_are_refused(self):
         async with self.server():
-            from nintendo.nex import authentication, rmc
             player = FakePlayer(PID_A, password_for(PID_A), self.port, self.port + 1)
             async with rmc.connect(player.neap_settings(), HOST, self.port) as client:
                 auth = authentication.AuthenticationClient(client)
-                for name in ("", "abc", "0", "99999999999", "-1"):
+                for name in ("", "abc", "0", "99999999999", "-1", "1" * 5000):
                     with self.assertRaises(common.RMCError) as caught:
                         await auth.login(name)
                     self.assertEqual(caught.exception.code(), INVALID_USERNAME, name)
@@ -450,6 +458,88 @@ class InteropTests(unittest.IsolatedAsyncioTestCase):
             await b.extension.auto_matchmake_with_param_postpone(auto_param())
             urls = await b.sessions.get_session_urls(session.id)
             self.assertEqual(urls[1]["port"], own)
+
+    async def test_login_flood_is_refused_per_address(self):
+        pids = [0x2000 + i for i in range(4)]            # within the limit of tickets per player
+        async with self.server(pids=pids):
+            neap = FakePlayer(pids[0], password_for(pids[0]), self.port, self.port + 1).neap_settings()
+            async with rmc.connect(neap, HOST, self.port) as client:
+                auth = authentication.AuthenticationClient(client)
+                for index in range(MAX_LOGINS_PER_IP):
+                    self.assertEqual((await auth.login(str(pids[index % 4]))).pid, pids[index % 4])
+                with self.assertRaises(common.RMCError) as caught:
+                    await auth.login(str(pids[0]))
+                self.assertEqual(caught.exception.code(), INVALID_USERNAME)
+
+    async def test_connection_cap_is_enforced_per_address(self):
+        async with self.server():
+            neap = FakePlayer(PID_A, password_for(PID_A), self.port, self.port + 1).neap_settings()
+            for _ in range(MAX_CONNECTIONS_PER_IP):
+                await self.stack.enter_async_context(rmc.connect(neap, HOST, self.port))
+            # The PRUDP handshake comes before the limit: the extra connection is closed right after it.
+            extra = await self.stack.enter_async_context(rmc.connect(neap, HOST, self.port))
+            await asyncio.sleep(0.3)
+            with self.assertRaises(RuntimeError):
+                async with asyncio.timeout(2):
+                    await extra.request(10, 1, b"")
+
+    async def test_random_datagrams_do_not_kill_the_server(self):
+        generator = random.Random(0x5EED2028)
+        async with self.server():
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as flood:
+                for index in range(10000):
+                    data = generator.randbytes(generator.randrange(0, 400))
+                    if index % 2 == 0:
+                        data = b"\xEA\xD0\x01" + data                  # gets past the first check
+                    flood.sendto(data, (HOST, self.port + index % 2))
+                    if index % 500 == 0:
+                        await asyncio.sleep(0)
+            await asyncio.sleep(0.5)
+            a = await self.player(PID_A)
+            self.assertEqual(a.login_response.pid, PID_A)
+            self.assertEqual(await a.extension.get_playing_session([a.pid]), [])
+
+    @unittest.skipUnless(os.environ.get("NEXLAB_LOAD_TEST") == "1", "set NEXLAB_LOAD_TEST=1 to run the load test")
+    async def test_100_players_in_waves_release_everything(self):
+        pids = [0x10000000 + i for i in range(LOAD_PLAYERS)]
+        failures = []
+        semaphore = asyncio.Semaphore(LOAD_WAVE)
+
+        async def run_player(index, brutal):
+            # The whole connection stays in one task: anyio cancel scopes cannot be exited from another.
+            pid = pids[index]
+            stack = contextlib.AsyncExitStack()
+            try:
+                async with semaphore:
+                    fake = FakePlayer(pid, password_for(pid), self.port, self.port + 1,
+                                      local_host=f"127.0.0.{2 + index % 250}")
+                    player = await fake.connect(stack)
+                    await player.extension.auto_matchmake_with_param_postpone(auto_param())
+                if brutal:
+                    with contextlib.suppress(BaseException):
+                        await player.client._client._socket.close()
+            except BaseException as error:
+                failures.append((index, error))
+            finally:
+                with contextlib.suppress(BaseException):
+                    await stack.aclose()
+
+        async with self.server(mode="public", pids=pids, idle_timeout=3, test_timeout=300):
+            started = time.perf_counter()
+            for start in range(0, LOAD_PLAYERS, LOAD_WAVE):
+                wave = range(start, min(start + LOAD_WAVE, LOAD_PLAYERS))
+                await asyncio.gather(*(run_player(i, i % 2 == 1) for i in wave))
+                await asyncio.sleep(0.8)
+            elapsed = time.perf_counter() - started
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                sessions = await self.admin("/admin/sessions")
+                if not sessions["players"] and not sessions["sessions"]:
+                    break
+                await asyncio.sleep(0.5)
+            print(f"[load] {IMPLEMENTATION}: {LOAD_PLAYERS} players, {len(failures)} failures, {elapsed:.2f} s")
+            self.assertEqual(failures, [])
+            self.assertEqual((sessions["players"], sessions["sessions"]), ([], []))
 
 
 if __name__ == "__main__":

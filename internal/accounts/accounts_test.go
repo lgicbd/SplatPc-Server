@@ -6,9 +6,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const password = "abcdefghijklmnop"
@@ -366,5 +368,62 @@ func TestCLI(t *testing.T) {
 	}
 	if code, _ := run("", "nope"); code != 2 {
 		t.Fatal("unknown command")
+	}
+}
+
+func TestRateLimitIgnoresRowsFromTheOldMonotonicClock(t *testing.T) {
+	store := open(t)
+	store.MaxAttempts = 2
+	if diff := store.Clock() - float64(time.Now().Unix()); diff < -5 || diff > 5 {
+		t.Fatalf("not the wall clock: %f", diff)
+	}
+	if _, err := store.handle().Exec(`INSERT INTO failures (ip, at) VALUES ('203.0.113.9', 90000.0)`); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := store.Allow("203.0.113.9"); err != nil || !allowed {
+		t.Fatalf("allowed=%t err=%v", allowed, err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := store.Failure("203.0.113.9"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if allowed, err := store.Allow("203.0.113.9"); err != nil || allowed {
+		t.Fatalf("allowed=%t err=%v", allowed, err)
+	}
+}
+
+func TestAnAccountCanBeErased(t *testing.T) {
+	store := open(t)
+	if _, err := store.Register(0x10000042, password); err != nil {
+		t.Fatal(err)
+	}
+	if erased, err := store.Delete(0x10000042); err != nil || !erased {
+		t.Fatalf("erased=%t err=%v", erased, err)
+	}
+	if key, err := store.Key(0x10000042); err != nil || key != nil {
+		t.Fatalf("key=%x err=%v", key, err)
+	}
+	if erased, err := store.Delete(0x10000042); err != nil || erased {
+		t.Fatalf("erased=%t err=%v", erased, err)
+	}
+}
+
+func TestDatabaseFileIsPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no POSIX modes")
+	}
+	path := filepath.Join(t.TempDir(), "players.sqlite3")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Fatalf("mode %o", mode)
 	}
 }

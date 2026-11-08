@@ -3,6 +3,7 @@ package prudp
 import (
 	"bytes"
 	"crypto/rc4"
+	"math/rand"
 	"net/netip"
 	"testing"
 	"time"
@@ -281,4 +282,29 @@ func TestLostPacketGivesUpAfterTheResendLimit(t *testing.T) {
 	default:
 		t.Fatal("still open")
 	}
+}
+
+func TestRandomDatagramsDoNotPanic(t *testing.T) {
+	random := rand.New(rand.NewSource(0x5EED2027))
+	for i := 0; i < 10000; i++ {
+		data := make([]byte, random.Intn(200))
+		random.Read(data)
+		if len(data) >= 3 && i%2 == 0 { // get past the first check
+			data[0], data[1], data[2] = magic[0], magic[1], 1
+		}
+		_, _ = Decode(data)
+	}
+}
+
+func FuzzDecode(f *testing.F) {
+	f.Add(samplePacket(TypeData).Encode())
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		packets, err := Decode(data)
+		if err == nil {
+			for _, packet := range packets {
+				packet.Encode()
+			}
+		}
+	})
 }

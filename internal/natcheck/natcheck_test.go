@@ -1,10 +1,15 @@
 package natcheck
 
 import (
+	"bytes"
 	"encoding/binary"
+	"fmt"
 	"net"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/lgicbd/SplatPc-Server/internal/logx"
 )
 
 func start(t *testing.T, sameSocket bool) (*Server, int) {
@@ -141,5 +146,94 @@ func TestObservationsAreConsumedOnceAndExpire(t *testing.T) {
 	}
 	if count := len(server.observations["4.4.4.4"]); count != maxObservations {
 		t.Fatalf("%d observations kept", count)
+	}
+}
+
+func TestSecondPortAnswersFromItself(t *testing.T) {
+	first := client(t)
+	second := client(t)
+	ports := []int{first.LocalAddr().(*net.UDPAddr).Port, second.LocalAddr().(*net.UDPAddr).Port}
+	first.Close()
+	second.Close()
+	server := Start([]string{"127.0.0.1"}, ports, false)
+	t.Cleanup(server.Close)
+	fields, sender := exchange(t, client(t), ports[1], 101)
+	if fields[0] != 101 || sender.Port != ports[1] {
+		t.Fatalf("fields %v from %v", fields, sender)
+	}
+}
+
+func TestObservationsArePerSourceAddress(t *testing.T) {
+	server, port := start(t, false)
+	message := make([]byte, messageSize)
+	binary.BigEndian.PutUint32(message, 101)
+	ports := map[string]int{}
+	for _, host := range []net.IP{net.IPv4(127, 0, 0, 3), net.IPv4(127, 0, 0, 4)} {
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: host})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		ports[host.String()] = conn.LocalAddr().(*net.UDPAddr).Port
+		if _, err := conn.WriteToUDP(message, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port}); err != nil {
+			t.Fatal(err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, _, err := conn.ReadFromUDP(make([]byte, 64)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for host, want := range ports {
+		if got, found := server.Consume(host); !found || got != want {
+			t.Fatalf("%s: %d, want %d", host, got, want)
+		}
+	}
+	if _, found := server.Consume("127.0.0.9"); found {
+		t.Fatal("nothing came from there")
+	}
+}
+
+func TestTypeTwoIsLeftUnansweredWithOneAddress(t *testing.T) {
+	probe := client(t)
+	port := probe.LocalAddr().(*net.UDPAddr).Port
+	probe.Close()
+	server := Start([]string{"127.0.0.1"}, []int{port}, false)
+	t.Cleanup(server.Close)
+	conn := client(t)
+	message := make([]byte, messageSize)
+	binary.BigEndian.PutUint32(message, 2)
+	if _, err := conn.WriteToUDP(message, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port}); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, _, err := conn.ReadFromUDP(make([]byte, 64)); err == nil {
+		t.Fatal("there is no other address to answer from")
+	}
+	if fields, _ := exchange(t, conn, port, 101); fields[0] != 101 {
+		t.Fatalf("fields %v", fields)
+	}
+}
+
+func TestObservationTableIsBounded(t *testing.T) {
+	server := &Server{observations: map[string][]observation{}}
+	for i := 0; i < maxObservedHosts+200; i++ {
+		server.observe(fmt.Sprintf("host-%d", i), 40000)
+	}
+	if len(server.observations) > maxObservedHosts {
+		t.Fatalf("%d hosts", len(server.observations))
+	}
+	if _, found := server.observations[fmt.Sprintf("host-%d", maxObservedHosts+199)]; !found {
+		t.Fatal("the newest must be kept")
+	}
+}
+
+func TestProbesAreNotLogged(t *testing.T) {
+	_, port := start(t, false)
+	var logs bytes.Buffer
+	logx.SetOutput(&logs)
+	t.Cleanup(func() { logx.SetOutput(os.Stderr) })
+	exchange(t, client(t), port, 101)
+	if logs.Len() != 0 {
+		t.Fatalf("logged %q", logs.String())
 	}
 }

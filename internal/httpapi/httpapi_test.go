@@ -360,3 +360,19 @@ func TestRealSocketClosesEachConnectionAndCapsThem(t *testing.T) {
 		t.Fatalf("%d close=%v %s", result.StatusCode, result.Close, body)
 	}
 }
+
+func TestRegisterRefusesPIDsTheGameNeverGenerates(t *testing.T) {
+	s, _ := server(t, nil)
+	expect(t, post(s, "/register", register("0x00000002")), 400, "", nil)
+	expect(t, post(s, "/register", register("0x0fffffff")), 400, "", nil)
+	expect(t, post(s, "/register", register("0x10000000")), 200, "status", "created")
+}
+
+func TestRegisterTokenMayBeNonASCII(t *testing.T) {
+	s, _ := server(t, func(o *Options) { o.Token = "sécret" })
+	body := func(token string) string {
+		return fmt.Sprintf(`{"pid":%q,"password":%q,"token":%q}`, pidText, password, token)
+	}
+	expect(t, post(s, "/register", body("autre")), 401, "", nil)
+	expect(t, post(s, "/register", body("sécret")), 200, "status", "created")
+}
