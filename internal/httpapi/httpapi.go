@@ -374,7 +374,19 @@ func (s *Server) socialRoute(w http.ResponseWriter, r *http.Request, route strin
 	case "/social/presence":
 		var friends []social.Friend
 		friends, err = s.Social.Heartbeat(text(payload, "token", "None"), payload["mode"], payload["friends"])
-		result = map[string]any{"friends": friends}
+		var requests []social.Request
+		if err == nil {
+			requests, err = s.Social.PendingRequests(text(payload, "token", "None"))
+		}
+		result = map[string]any{"friends": friends, "requests": requests}
+	case "/social/request":
+		result, err = s.Social.SendRequest(text(payload, "token", "None"), payload["pid"])
+	case "/social/answer":
+		err = s.Social.AnswerRequest(text(payload, "token", "None"), payload["pid"], payload["accept"])
+		result = map[string]bool{"ok": true}
+	case "/social/cancel":
+		err = s.Social.CancelRequest(text(payload, "token", "None"), payload["pid"])
+		result = map[string]bool{"ok": true}
 	default:
 		replyError(w, http.StatusNotFound, "not found")
 		return

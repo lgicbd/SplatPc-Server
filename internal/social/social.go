@@ -99,6 +99,10 @@ type Social struct {
 	LookupRate   *limit.Limiter // searches, per player
 	LookupIPRate *limit.Limiter // searches, per source address
 	PresenceRate *limit.Limiter // per player (a heartbeat every 5 s is 12 per minute)
+	RequestRate  *limit.Limiter // friend requests sent, per player
+	AnswerRate   *limit.Limiter // answers and cancellations, per player
+
+	requestMu sync.Mutex // one friend request change at a time: they read then write
 }
 
 // New takes the release table version -> code hashes; a nil clock is the wall clock.
@@ -120,7 +124,8 @@ func New(store *accounts.Store, clock func() float64, integrityMode string, rele
 		attested: map[uint32]attestation{}, tokens: map[string]session{}, tokenOf: map[uint32]string{},
 		presences:   map[uint32]presence{},
 		SessionRate: limit.New(30, 60, nil), AuthRate: limit.New(300, 60, nil),
-		LookupRate: limit.New(20, 60, nil), LookupIPRate: limit.New(60, 60, nil), PresenceRate: limit.New(40, 60, nil)}
+		LookupRate: limit.New(20, 60, nil), LookupIPRate: limit.New(60, 60, nil), PresenceRate: limit.New(40, 60, nil),
+		RequestRate: limit.New(10, 60, nil), AnswerRate: limit.New(30, 60, nil)}
 }
 
 // AllowAuth is false when this address, or the server as a whole, had too many password checks.

@@ -376,3 +376,56 @@ func TestRegisterTokenMayBeNonASCII(t *testing.T) {
 	expect(t, post(s, "/register", body("autre")), 401, "", nil)
 	expect(t, post(s, "/register", body("sécret")), 200, "status", "created")
 }
+
+// player registers an account with a pseudo and returns its session token.
+func player(t *testing.T, s *Server, pid, pseudo string) string {
+	t.Helper()
+	credentials := fmt.Sprintf(`"pid":%q,"password":%q`, pid, password)
+	expect(t, post(s, "/register", "{"+credentials+"}"), 200, "", nil)
+	expect(t, post(s, "/social/pseudo", "{"+credentials+fmt.Sprintf(`,"pseudo":%q}`, pseudo)), 200, "pseudo", pseudo)
+	got := post(s, "/social/session", "{"+credentials+"}")
+	expect(t, got, 200, "", nil)
+	return got.body["token"].(string)
+}
+
+func TestFriendRequestRoutes(t *testing.T) {
+	s, _ := server(t, nil)
+	alice, bob := player(t, s, "5eea2491", "Alice"), player(t, s, "5eea2492", "Bob")
+	expect(t, post(s, "/social/request", fmt.Sprintf(`{"token":%q,"pid":"5eea2492"}`, alice)), 200, "state", "sent")
+
+	got := post(s, "/social/presence", fmt.Sprintf(`{"token":%q,"friends":[]}`, bob))
+	expect(t, got, 200, "", nil)
+	requests, _ := got.body["requests"].([]any)
+	if len(requests) != 1 || requests[0].(map[string]any)["pid"] != "5eea2491" || requests[0].(map[string]any)["name"] != "Alice" {
+		t.Fatal(got.body)
+	}
+	if friends, present := got.body["friends"].([]any); !present || len(friends) != 0 {
+		t.Fatal("a 0.1.4 client keeps reading `friends`", got.body)
+	}
+	expect(t, post(s, "/social/answer", fmt.Sprintf(`{"token":%q,"pid":"5eea2491","accept":true}`, bob)), 200, "ok", true)
+	expect(t, post(s, "/social/answer", fmt.Sprintf(`{"token":%q,"pid":"5eea2491","accept":true}`, bob)), 404, "error", "no such request")
+	got = post(s, "/social/presence", fmt.Sprintf(`{"token":%q,"friends":[]}`, bob))
+	if requests, _ := got.body["requests"].([]any); requests == nil || len(requests) != 0 {
+		t.Fatal("an empty box is [], not null", got.body)
+	}
+
+	expect(t, post(s, "/social/request", fmt.Sprintf(`{"token":%q,"pid":"5eea2491"}`, alice)), 400, "error", "you cannot add yourself")
+	expect(t, post(s, "/social/request", `{"token":"nope","pid":"5eea2492"}`), 401, "error", "session expired")
+	expect(t, post(s, "/social/cancel", fmt.Sprintf(`{"token":%q,"pid":"5eea2492"}`, alice)), 200, "ok", true)
+	expect(t, post(s, "/social/cancel", `{"token":"nope","pid":"5eea2492"}`), 401, "", nil)
+}
+
+func TestFriendRequestsLeaveWhenABanLands(t *testing.T) {
+	s, _ := server(t, nil)
+	alice, bob := player(t, s, "5eea2491", "Alice"), player(t, s, "5eea2492", "Bob")
+	post(s, "/social/request", fmt.Sprintf(`{"token":%q,"pid":"5eea2492"}`, alice))
+	if err := s.Accounts.AddBan(ptr(0x5eea2491), "", "test", nil); err != nil {
+		t.Fatal(err)
+	}
+	got := post(s, "/social/presence", fmt.Sprintf(`{"token":%q,"friends":[]}`, bob))
+	if requests, _ := got.body["requests"].([]any); len(requests) != 0 {
+		t.Fatal(got.body)
+	}
+}
+
+func ptr(pid uint32) *uint32 { return &pid }

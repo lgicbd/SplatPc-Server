@@ -2,11 +2,13 @@ package social
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/lgicbd/SplatPc-Server/internal/accounts"
+	"github.com/lgicbd/SplatPc-Server/internal/limit"
 )
 
 const (
@@ -238,8 +240,6 @@ func TestABannedPlayerIsRefusedEverywhere(t *testing.T) {
 	}
 }
 
-func ptr(pid uint32) *uint32 { return &pid }
-
 func TestHeartbeatIgnoresHostileInput(t *testing.T) {
 	f := setup(t, "", nil)
 	a, b := f.session(alice), f.session(bob)
@@ -309,5 +309,244 @@ func TestIntegrity(t *testing.T) {
 	}
 	if !setup(t, "off", nil).IsAttested(alice) {
 		t.Fatal("off")
+	}
+}
+
+// named gives each listed player a pseudo, so they can send and receive friend requests.
+func (f *fixture) named(players map[uint32]string) {
+	f.t.Helper()
+	for pid, pseudo := range players {
+		if _, err := f.ClaimPseudo(pid, password, pseudo); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+}
+
+func (f *fixture) ask(token string, target uint32) string {
+	f.t.Helper()
+	result, err := f.SendRequest(token, fmt.Sprintf("%08x", target))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return result["state"]
+}
+
+func (f *fixture) pending(token string) []Request {
+	f.t.Helper()
+	result, err := f.PendingRequests(token)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return result
+}
+
+func hexPID(pid uint32) string { return fmt.Sprintf("%08x", pid) }
+
+func TestARequestIsSeenAnsweredAndMakesTheListsMutual(t *testing.T) {
+	f := setup(t, "", nil)
+	f.named(map[uint32]string{alice: "Alice", bob: "Bob"})
+	a, b := f.session(alice), f.session(bob)
+	if got := f.ask(a, bob); got != "sent" {
+		t.Fatal(got)
+	}
+	if got := f.ask(a, bob); got != "sent" || len(f.pending(b)) != 1 {
+		t.Fatal("a second request for the same pair must not pile up", got, f.pending(b))
+	}
+	if got := f.pending(b); got[0] != (Request{hexPID(alice), "Alice"}) {
+		t.Fatal(got)
+	}
+	if len(f.pending(a)) != 0 {
+		t.Fatal("the sender sees nothing")
+	}
+	if err := f.AnswerRequest(b, hexPID(alice), true); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.pending(b)) != 0 {
+		t.Fatal("answered requests leave the box")
+	}
+	// Alice listed Bob when she asked; Bob lists her on accepting: presence is mutual.
+	f.beat(a, hexPID(bob))
+	if friends := f.beat(b, hexPID(alice)); len(friends) != 1 || friends[0].Name != "Alice" {
+		t.Fatal(friends)
+	}
+	if err := f.AnswerRequest(b, hexPID(alice), true); status(err) != 404 {
+		t.Fatal("answering twice", err)
+	}
+}
+
+func TestARefusalIsSilentAndExpiresAfterThirtyDays(t *testing.T) {
+	f := setup(t, "", nil)
+	f.named(map[uint32]string{alice: "Alice", bob: "Bob"})
+	a, b := f.session(alice), f.session(bob)
+	f.ask(a, bob)
+	if err := f.AnswerRequest(b, hexPID(alice), false); err != nil {
+		t.Fatal(err)
+	}
+	f.now += 3600 // inside the 12 h token
+	if got := f.ask(a, bob); got != "sent" || len(f.pending(b)) != 0 {
+		t.Fatal("the refusal is silent and still blocks", got, f.pending(b))
+	}
+	f.now += DeclineTTL
+	a, b = f.session(alice), f.session(bob) // the 12 h tokens ran out
+	if got := f.ask(a, bob); got != "sent" || len(f.pending(b)) != 1 {
+		t.Fatal("after 30 days the sender may ask again", got, f.pending(b))
+	}
+}
+
+func TestCrossedRequestsAreMutualAtOnceEvenAfterARefusal(t *testing.T) {
+	f := setup(t, "", nil)
+	f.named(map[uint32]string{alice: "Alice", bob: "Bob", carol: "Carol"})
+	a, b, c := f.session(alice), f.session(bob), f.session(carol)
+	f.ask(b, alice)
+	if got := f.ask(a, bob); got != "friends" {
+		t.Fatal("Bob had asked Alice first", got)
+	}
+	if len(f.pending(a)) != 0 || len(f.pending(b)) != 0 {
+		t.Fatal("nothing is left to answer")
+	}
+	// Alice refused Carol, then asks Carol herself.
+	f.ask(c, alice)
+	if err := f.AnswerRequest(a, hexPID(carol), false); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.ask(a, carol); got != "friends" {
+		t.Fatal("a request to someone who asked before is mutual, refusal or not", got)
+	}
+}
+
+func TestRemovingAFriendCancelsTheRequest(t *testing.T) {
+	f := setup(t, "", nil)
+	f.named(map[uint32]string{alice: "Alice", bob: "Bob"})
+	a, b := f.session(alice), f.session(bob)
+	f.ask(a, bob)
+	if err := f.CancelRequest(a, hexPID(bob)); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.pending(b)) != 0 {
+		t.Fatal("a pending request is withdrawn")
+	}
+	// A friendship that ended starts over with a new request.
+	f.ask(a, bob)
+	if err := f.AnswerRequest(b, hexPID(alice), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.CancelRequest(a, hexPID(bob)); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.ask(a, bob); got != "sent" || len(f.pending(b)) != 1 {
+		t.Fatal(got, f.pending(b))
+	}
+	// A refusal survives the cancellation: it protects the one who refused.
+	if err := f.AnswerRequest(b, hexPID(alice), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.CancelRequest(a, hexPID(bob)); err != nil {
+		t.Fatal(err)
+	}
+	if f.ask(a, bob); len(f.pending(b)) != 0 {
+		t.Fatal("still refused")
+	}
+}
+
+func TestRequestsRefuseBadTargetsWithoutRevealingPlayers(t *testing.T) {
+	f := setup(t, "", nil)
+	f.named(map[uint32]string{alice: "Alice", bob: "Bob"})
+	a := f.session(alice)
+	if _, err := f.SendRequest(a, hexPID(alice)); status(err) != 400 {
+		t.Fatal("yourself", err)
+	}
+	if _, err := f.SendRequest(a, "junk"); status(err) != 400 {
+		t.Fatal("junk", err)
+	}
+	if got := f.ask(a, 0x5eea9999); got != "sent" {
+		t.Fatal("an unknown pid looks like any other", got)
+	}
+	if got := f.ask(a, carol); got != "sent" {
+		t.Fatal("a player without a pseudo looks the same", got)
+	}
+	if err := f.Accounts.AddBan(ptr(bob), "", "test", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.ask(a, bob); got != "sent" {
+		t.Fatal("a banned player looks the same", got)
+	}
+	c := f.session(carol)
+	if _, err := f.SendRequest(c, hexPID(alice)); status(err) != 400 {
+		t.Fatal("a sender needs a pseudo", err)
+	}
+	if _, err := f.SendRequest("nope", hexPID(bob)); status(err) != 401 {
+		t.Fatal("no session")
+	}
+}
+
+func ptr(pid uint32) *uint32 { return &pid }
+
+func TestRequestLimits(t *testing.T) {
+	f := setup(t, "", nil)
+	f.named(map[uint32]string{alice: "Alice", bob: "Bob"})
+	f.RequestRate = limit.New(1000, 60, nil) // this test is about the pending caps, not the rate
+	a := f.session(alice)
+	for i := 0; i < MaxPendingSent; i++ {
+		pid := 0x5eea4000 + uint32(i)
+		if _, err := f.Accounts.Register(pid, password); err != nil {
+			t.Fatal(err)
+		}
+		f.named(map[uint32]string{pid: fmt.Sprintf("Tgt%d", i)})
+		f.ask(a, pid)
+	}
+	if _, err := f.SendRequest(a, hexPID(bob)); status(err) != 429 {
+		t.Fatal("the 21st pending request", err)
+	}
+	// Bob's box holds 50: the 51st sender is not refused loudly, the request is just not stored.
+	b := f.session(bob)
+	for i := 0; i < MaxPendingReceived+1; i++ {
+		pid := 0x5eea5000 + uint32(i)
+		if _, err := f.Accounts.Register(pid, password); err != nil {
+			t.Fatal(err)
+		}
+		f.named(map[uint32]string{pid: fmt.Sprintf("Snd%d", i)})
+		if got := f.ask(f.session(pid), bob); got != "sent" {
+			t.Fatal(got)
+		}
+	}
+	if got := len(f.pending(b)); got != MaxPendingReceived {
+		t.Fatal("box size", got)
+	}
+}
+
+func TestRequestRatePerMinute(t *testing.T) {
+	f := setup(t, "", nil)
+	f.named(map[uint32]string{alice: "Alice", bob: "Bob"})
+	a := f.session(alice)
+	limited := false
+	for i := 0; i < 15 && !limited; i++ {
+		_, err := f.SendRequest(a, hexPID(bob))
+		limited = status(err) == 429
+	}
+	if !limited {
+		t.Fatal("no per-minute cap")
+	}
+}
+
+func TestABanErasesTheRequests(t *testing.T) {
+	f := setup(t, "", nil)
+	f.named(map[uint32]string{alice: "Alice", bob: "Bob", carol: "Carol"})
+	a, b := f.session(alice), f.session(bob)
+	f.ask(a, bob)
+	f.ask(b, carol)
+	if err := f.Accounts.AddBan(ptr(alice), "", "test", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.pending(b); len(got) != 0 {
+		t.Fatal("the banned sender's request is gone", got)
+	}
+	if err := f.Accounts.AddBan(ptr(carol), "", "test", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Accounts.Delete(bob); err != nil {
+		t.Fatal(err)
+	}
+	if senders, err := f.Accounts.PendingFor(carol, 10); err != nil || len(senders) != 0 {
+		t.Fatal(senders, err)
 	}
 }

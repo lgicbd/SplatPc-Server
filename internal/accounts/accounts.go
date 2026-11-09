@@ -161,6 +161,8 @@ func createSchema(db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS pseudos (pid INTEGER PRIMARY KEY, pseudo TEXT NOT NULL, pkey TEXT NOT NULL UNIQUE)`,
 		`CREATE TABLE IF NOT EXISTS bans (pid INTEGER, ip TEXT, reason TEXT, created REAL NOT NULL, UNIQUE(pid, ip))`,
 		`CREATE TABLE IF NOT EXISTS mod_log (at REAL NOT NULL, action TEXT NOT NULL, pid INTEGER, ip TEXT, detail TEXT)`,
+		createFriendRequests, // the Python server ignores this table, so going back to it stays possible
+		createFriendRequestsIndex,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			return err
@@ -287,6 +289,9 @@ func (s *Store) Touch(pid uint32) error {
 func (s *Store) Delete(pid uint32) (bool, error) {
 	result, err := s.handle().Exec(`DELETE FROM accounts WHERE pid = ?`, pid)
 	if err != nil {
+		return false, err
+	}
+	if err := s.DeleteRequestsOf(pid); err != nil {
 		return false, err
 	}
 	removed, err := result.RowsAffected()
@@ -502,6 +507,11 @@ func (s *Store) AddBan(pid *uint32, ip, reason string, hours *float64) error {
 	if _, err := transaction.Exec(`INSERT INTO bans (pid, ip, reason, created, expires) VALUES (?, ?, ?, ?, ?)`,
 		nullablePID(pid), nullableIP(ip), reason, now, expires); err != nil {
 		return err
+	}
+	if pid != nil { // a banned player's friend requests disappear, sent and received
+		if _, err := transaction.Exec(`DELETE FROM friend_requests WHERE from_pid = ? OR to_pid = ?`, *pid, *pid); err != nil {
+			return err
+		}
 	}
 	if err := s.writeLog(transaction, "ban", pid, ip, length+": "+reason); err != nil {
 		return err
