@@ -492,6 +492,28 @@ class InteropTests(unittest.IsolatedAsyncioTestCase):
                     code = error.code()
             self.assertEqual(code, SESSION_VOID)
 
+    async def test_friend_requests_over_http(self):
+        """Go only: the Python server has no /social/request. A 0.1.4 client keeps working beside it."""
+        async with self.server(mode="public"):
+            tokens = {}
+            for pid, pseudo in ((PID_A, "Anna"), (PID_B, "Ben")):
+                body = {"pid": f"0x{pid:x}", "password": password_for(pid)}
+                self.assertEqual((await self.post("/social/pseudo", dict(body, pseudo=pseudo)))[0], 200)
+                status, answer = await self.post("/social/session", body)
+                self.assertEqual(status, 200)
+                tokens[pid] = answer["token"]
+            status, answer = await self.post("/social/request", {"token": tokens[PID_A], "pid": f"{PID_B:08x}"})
+            self.assertEqual((status, answer["state"]), (200, "sent"))
+            status, answer = await self.post("/social/presence", {"token": tokens[PID_B], "friends": []})
+            self.assertEqual((status, answer["friends"], answer["requests"]), (200, [], [{"pid": f"{PID_A:08x}", "name": "Anna"}]))
+            status, _ = await self.post("/social/answer", {"token": tokens[PID_B], "pid": f"{PID_A:08x}", "accept": True})
+            self.assertEqual(status, 200)
+            # Anna listed Ben when she asked, Ben lists Anna on accepting: they see each other online.
+            await self.post("/social/presence", {"token": tokens[PID_A], "friends": [f"{PID_B:08x}"]})
+            status, answer = await self.post("/social/presence", {"token": tokens[PID_B], "friends": [f"{PID_A:08x}"]})
+            self.assertEqual([friend["name"] for friend in answer["friends"]], ["Anna"])
+            self.assertEqual(answer["requests"], [])
+
     async def test_probe_is_forwarded_only_between_session_members(self):
         async with self.server(mode="public"):
             a = await self.player(PID_A, local_host="127.0.0.2")
