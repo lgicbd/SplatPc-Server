@@ -6,6 +6,7 @@
     py -3 deploy/deploy_go.py cutover ... --apply      stops Python, starts Go on the live database and server.json
     py -3 deploy/deploy_go.py rollback ... --apply     stops Go, restarts Python on the same database
 
+parallel and stop-parallel refuse once Go is live (their unit is then production): go_test_env.py runs a test server.
 The parallel server has no NAT check: UDP 10025 and 10125 belong to the running Python server, which keeps answering.
 While Go is live a guard stops the Python unit from starting, because both must never share the database.
 Each step checks /health, the owner of server.json and the database files. A cutover that fails its checks rolls back.
@@ -128,7 +129,13 @@ def report(target: Target, go: Go, local_port: int) -> bool:
         return False
 
 
+def go_is_live(target: Target, go: Go) -> bool:
+    return bool(target.ssh(f"test -e {go.live_flag} && echo live", check=False).strip())
+
+
 def parallel(target: Target, go: Go) -> None:
+    if go_is_live(target, go):  # the parallel unit IS the live one now: this would rewrite and restart production
+        sys.exit("Go is the live server here: parallel would replace its configuration. Use go_test_env.py for a test server.")
     stamp = time.strftime("%Y%m%d-%H%M%S")
     backup(target, stamp)
     install_binary(target, go)
@@ -147,7 +154,7 @@ def parallel(target: Target, go: Go) -> None:
 
 
 def stop_parallel(target: Target, go: Go) -> None:
-    if target.ssh(f"test -e {go.live_flag} && echo live", check=False).strip():
+    if go_is_live(target, go):
         sys.exit("Go is the live server here: use rollback, not stop-parallel.")
     target.ssh(f"systemctl stop {GO_SERVICE}; " + go.firewall("delete allow"))
     report(target, go, target.local_port)
@@ -189,7 +196,8 @@ def rollback(target: Target, go: Go) -> None:
 
 def dry_run(target: Target, go: Go, step: str) -> None:
     print("server machine:", target.ssh("uname -m").strip(), "| free space:", target.ssh("df -h / | tail -1").split()[3])
-    print(f"python: {active(target, target.service)} | go: {active(target, GO_SERVICE)}")
+    print(f"python: {active(target, target.service)} | go: {active(target, GO_SERVICE)}"
+          + (" (live: parallel and stop-parallel refuse)" if go_is_live(target, go) else ""))
     print("public health:", target.health())
     print("ports in use:", " ".join(sorted(set(target.ssh(f"ss -lunH | grep -E ':(60000|60001|10025|10125|{go.auth_port}|{go.auth_port + 1}) ' | awk '{{print $4}}' | sed 's/.*://'", check=False).split()))))
     print("firewall:", target.ssh("ufw status 2>/dev/null | head -1", check=False).strip() or "no ufw")

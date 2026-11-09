@@ -5,6 +5,7 @@ Generic scripts to run the server on a Linux machine you own. Nothing here knows
 | File | Purpose |
 |---|---|
 | `deploy_go.py` | move a Python server to the Go binary over SSH: parallel run, cutover, rollback |
+| `go_test_env.py` | once Go is live: a test Go server next to it (own unit, ports and database copy, integrity `log`) |
 | `deploy_server.py` | upload the Python server code over SSH with backups, restart, verify, `--rollback` |
 | `set_integrity.py` | set `integrity_mode` and the accepted release hashes in `server.json` |
 | `rehearsal.py` | try the move locally on the old Python code and a database it made |
@@ -50,6 +51,14 @@ py -3 deploy/deploy_go.py rollback --host root@SERVER --key ~/.ssh/KEY --domain 
 at it with a local `scripts/server.txt`, and reach its HTTP endpoint (friends, integrity proof) through the SSH tunnel it
 prints. `cutover` drops running matches. After it, pass `--service splatoon-nex-go` to `set_integrity.py`: a guard keeps the
 Python unit from starting while Go is live, so restarting it does nothing.
+
+Once Go is live, `parallel` and `stop-parallel` refuse (their unit is production). For a test server, use instead:
+
+```
+py -3 deploy/go_test_env.py install --host root@SERVER --key ~/.ssh/KEY --domain your-domain.example           # dry run
+py -3 deploy/go_test_env.py install --host root@SERVER --key ~/.ssh/KEY --domain your-domain.example --apply
+py -3 deploy/go_test_env.py stop --host root@SERVER --key ~/.ssh/KEY --domain your-domain.example --apply
+```
 
 ### Tried on a WSL Ubuntu-24.04 (08/11)
 
