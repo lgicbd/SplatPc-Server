@@ -42,7 +42,8 @@ func TestParsePID(t *testing.T) {
 	}
 }
 
-// The reference comes from the former Python server (nintendo.nex.kerberos.KeyDerivationOld).
+// The reference comes from the former Python server (nintendo.nex.kerberos.KeyDerivationOld,
+// tools/tests/vectors/generate_vectors.py at the tag python-final).
 func TestDeriveKeyMatchesReferenceVector(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "vectors", "derive_key.txt"))
 	if err != nil {

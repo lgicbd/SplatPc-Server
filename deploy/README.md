@@ -4,55 +4,43 @@ Generic scripts to run the server on a Linux machine you own. Nothing here knows
 
 | File | Purpose |
 |---|---|
-| `deploy_go.py` | move a Python server to the Go binary over SSH: parallel run, cutover, rollback |
-| `go_test_env.py` | once Go is live: a test Go server next to it (own unit, ports and database copy, integrity `log`) |
-| `deploy_server.py` | upload the Python server code over SSH with backups, restart, verify, `--rollback` |
-| `set_integrity.py` | set `integrity_mode` and the accepted release hashes in `server.json` |
-| `rehearsal.py` | try the move locally on the old Python code and a database it made |
+| `set_integrity.py` | set `integrity_mode` and the accepted release hashes in `server.json`, checked by the binary, then restart |
+| `go_test_env.py` | a test server next to the live one (own unit, ports and database copy, integrity `log`) |
+| `go_server.py`, `remote.py` | shared by the scripts: paths on the server, SSH, build of the Linux binary |
 | `Caddyfile` | HTTPS in front of sign-up, friends and `/health` |
-| `splatoon-nex-go.service` | systemd unit of the Go server |
-| `splatoon-nex.service` | systemd unit of the Python server |
+| `splatoon-nex-go.service` | systemd unit of the server |
+| `server.example.json` | configuration to start from, see [docs/SERVEUR.md](../docs/SERVEUR.md) |
 
 ## First install (Linux, as root)
 
+Build the binary on your PC (`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o build/linux/splatoon-nex ./cmd/splatoon-nex`),
+copy it and this folder to the server, then:
+
 ```
 useradd --system --home /opt/splatoon splatoon
-mkdir -p /opt/splatoon/tools /var/lib/splatoon /var/log/splatoon
+mkdir -p /opt/splatoon/go /var/lib/splatoon /var/log/splatoon
 chown splatoon: /var/lib/splatoon /var/log/splatoon
-python3.12 -m venv /opt/splatoon/venv
-cp -r tools/nexlab /opt/splatoon/tools/          # then: /opt/splatoon/venv/bin/pip install -r tools/nexlab/requirements.txt
-cp tools/nexlab/server.example.json /opt/splatoon/server.json   # edit it, see docs/SERVEUR.md
+install -o splatoon -g splatoon -m 755 splatoon-nex /opt/splatoon/go/splatoon-nex
+cp deploy/server.example.json /opt/splatoon/server.json        # edit it, see docs/SERVEUR.md
 chown splatoon: /opt/splatoon/server.json && chmod 600 /opt/splatoon/server.json
-cp deploy/splatoon-nex.service /etc/systemd/system/ && systemctl enable --now splatoon-nex
+ln -s ../server.json /opt/splatoon/go/server.json && chown -h splatoon: /opt/splatoon/go/server.json
+runuser -u splatoon -- /opt/splatoon/go/splatoon-nex --config /opt/splatoon/go/server.json --check-config
+cp deploy/splatoon-nex-go.service /etc/systemd/system/ && systemctl enable --now splatoon-nex-go
 ```
 
-## Update
+`server.json` must be plain UTF-8 without a BOM. Set `accounts_db` to a file in `/var/lib/splatoon` (the unit can only
+write there and in `/var/log/splatoon`).
+
+## Integrity and minimum version
 
 ```
-py -3 deploy/rehearsal.py --old-rev <revision running now>
-py -3 deploy/deploy_server.py --host root@SERVER --key ~/.ssh/KEY --domain your-domain.example           # dry run
-py -3 deploy/deploy_server.py --host root@SERVER --key ~/.ssh/KEY --domain your-domain.example --apply
+py -3 deploy/set_integrity.py --host root@SERVER --key ~/.ssh/KEY --domain your-domain.example enforce 0.1.5=<hash>           # dry run
+py -3 deploy/set_integrity.py --host root@SERVER --key ~/.ssh/KEY --domain your-domain.example enforce 0.1.5=<hash> --apply
 ```
 
-The restart drops running matches: update when nobody plays.
+The restart drops running matches: change it when nobody plays. The script prints the undo command.
 
-## Move from Python to Go
-
-```
-py -3.12 deploy/rehearsal.py --old-rev <revision running now>
-py -3 deploy/deploy_go.py parallel --host root@SERVER --key ~/.ssh/KEY --domain your-domain.example           # dry run
-py -3 deploy/deploy_go.py parallel --host root@SERVER --key ~/.ssh/KEY --domain your-domain.example --apply
-py -3 deploy/deploy_go.py stop-parallel --host root@SERVER --key ~/.ssh/KEY --domain your-domain.example --apply
-py -3 deploy/deploy_go.py cutover --host root@SERVER --key ~/.ssh/KEY --domain your-domain.example --apply
-py -3 deploy/deploy_go.py rollback --host root@SERVER --key ~/.ssh/KEY --domain your-domain.example --apply
-```
-
-`parallel` runs Go next to Python on UDP 60100 and 60101, with a copy of the database and no NAT check. Point a test game
-at it with a local `scripts/server.txt`, and reach its HTTP endpoint (friends, integrity proof) through the SSH tunnel it
-prints. `cutover` drops running matches. After it, pass `--service splatoon-nex-go` to `set_integrity.py`: a guard keeps the
-Python unit from starting while Go is live, so restarting it does nothing.
-
-Once Go is live, `parallel` and `stop-parallel` refuse (their unit is production). For a test server, use instead:
+## Test server
 
 ```
 py -3 deploy/go_test_env.py install --host root@SERVER --key ~/.ssh/KEY --domain your-domain.example           # dry run
@@ -60,10 +48,12 @@ py -3 deploy/go_test_env.py install --host root@SERVER --key ~/.ssh/KEY --domain
 py -3 deploy/go_test_env.py stop --host root@SERVER --key ~/.ssh/KEY --domain your-domain.example --apply
 ```
 
-### Tried on a WSL Ubuntu-24.04 (08/11)
+It runs on UDP 60100 and 60101 with a copy of the database and no NAT check. Point a test game at it with a local
+`scripts/server.txt`, and reach its HTTP endpoint through the SSH tunnel it prints. The database copy uses `python3` on the
+server (`--remote-python` to choose another).
 
-First install as above (plus `apt install openssh-server python3-venv`; WSL needs `systemd=true` in `/etc/wsl.conf`, and a
-process kept running, e.g. `wsl -u root -- sleep infinity`, or the VM stops and SSH with it). With the Python unit running:
-`parallel`, `stop-parallel`, `cutover`, `set_integrity.py ... --service splatoon-nex-go --apply` and `rollback` all passed,
-`server.json` stayed owned by `splatoon` with mode 600, Go came back alone after a reboot (Python unit disabled and guarded).
-`server.json` must be plain UTF-8 without a BOM: the script reads it as JSON.
+## Tests
+
+```
+py -3 -m unittest discover -s deploy/tests -v
+```

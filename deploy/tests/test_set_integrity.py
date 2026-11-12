@@ -1,5 +1,5 @@
 """set_integrity.py edits only the integrity keys of server.json (no SSH: the edit is a plain function).
-    py -3.12 -m unittest tools.tests.test_set_integrity -v
+    py -3 -m unittest discover -s deploy/tests -v
 """
 import argparse
 import json
@@ -7,7 +7,7 @@ import pathlib
 import sys
 import unittest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "deploy"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import set_integrity  # noqa: E402
 from remote import Target, add_target_args  # noqa: E402
 
@@ -33,13 +33,13 @@ class SetIntegrity(unittest.TestCase):
 
 
 class FakeTarget:
-    """Records each command; answers like a server where Go is live (or not) and whose check passes (or not)."""
+    """Records each command; answers like a server whose check passes (or not)."""
 
-    def __init__(self, live: bool, check_passes: bool = True):
+    def __init__(self, check_passes: bool = True):
         parser = argparse.ArgumentParser()
         add_target_args(parser)
         self.real = Target(parser.parse_args(["--host", "root@203.0.113.10"]))
-        self.live, self.check_passes, self.commands = live, check_passes, []
+        self.check_passes, self.commands = check_passes, []
 
     def __getattr__(self, name):
         return getattr(self.real, name)
@@ -50,7 +50,7 @@ class FakeTarget:
             return "live\n" if self.live else ""
         if command.startswith("cat /"):
             return json.dumps(OLD)
-        if ("--check-config" in command or "server_config" in command) and not self.check_passes:
+        if "--check-config" in command and not self.check_passes:
             sys.exit("Server command failed")
         return ""
 
@@ -69,7 +69,7 @@ class Run(unittest.TestCase):
         return [c for c in target.commands if c.startswith(("mv ", "cp ")) or "systemctl restart" in c]
 
     def test_the_dry_run_asks_the_go_binary_and_changes_nothing(self):
-        target = FakeTarget(live=True)
+        target = FakeTarget()
         set_integrity.run(target, "enforce", "0.1.5=" + "c" * 64, "0.1.5", apply=False)
         self.assertTrue(any("/opt/splatoon/go/splatoon-nex --config /opt/splatoon/server.json.new --check-config" in c
                             for c in target.commands))
@@ -77,7 +77,7 @@ class Run(unittest.TestCase):
         self.assertEqual(target.commands[-1], "rm -f /opt/splatoon/server.json.new")
 
     def test_apply_restarts_the_go_unit_after_the_check_and_the_backup(self):
-        target = FakeTarget(live=True)
+        target = FakeTarget()
         set_integrity.run(target, "enforce", "0.1.5=" + "c" * 64, "0.1.5", apply=True)
         changes = self.changes(target)
         self.assertTrue(changes[0].startswith("cp -p /opt/splatoon/server.json /opt/splatoon/server.json.bak-"))
@@ -87,17 +87,11 @@ class Run(unittest.TestCase):
         self.assertLess(check, target.commands.index(changes[0]))
 
     def test_a_refused_file_is_removed_and_nothing_changes(self):
-        target = FakeTarget(live=True, check_passes=False)
+        target = FakeTarget(check_passes=False)
         with self.assertRaises(SystemExit):
             set_integrity.run(target, "enforce", "0.1.5=" + "c" * 64, "0.1.5", apply=True)
         self.assertEqual(self.changes(target), [])
         self.assertEqual(target.commands[-1], "rm -f /opt/splatoon/server.json.new")
-
-    def test_the_python_server_is_still_checked_by_its_own_code(self):
-        target = FakeTarget(live=False)
-        set_integrity.run(target, "log", None, None, apply=True)
-        self.assertTrue(any("server_config" in c for c in target.commands))
-        self.assertTrue(self.changes(target)[-1].endswith("systemctl restart splatoon-nex"))
 
 
 if __name__ == "__main__":

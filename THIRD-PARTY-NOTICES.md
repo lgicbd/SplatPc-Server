@@ -3,8 +3,7 @@
 ## NintendoClients
 
 The PRUDP packet format in `internal/prudp/packet.go` is adapted from
-[NintendoClients](https://github.com/kinnay/NintendoClients). The Python tests also use it as their
-client.
+[NintendoClients](https://github.com/kinnay/NintendoClients).
 
 ```
 MIT License

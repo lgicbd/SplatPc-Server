@@ -1,5 +1,5 @@
-# systemd unit for the Go NEX server. Installed by deploy/deploy_go.py, see deploy/README.md.
-# go/server.json is the parallel configuration, or a link to ../server.json once the Go server is live.
+# systemd unit for the Go NEX server, see deploy/README.md.
+# go/server.json is a link to ../server.json, the file set_integrity.py edits.
 [Unit]
 Description=Splatoon NEX server, Go (matchmaking, NAT check)
 After=network-online.target

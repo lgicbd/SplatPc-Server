@@ -5,8 +5,7 @@
     py -3 deploy/go_test_env.py stop --host root@SERVER [--key KEY] --apply       stop it and close its UDP ports
     py -3 deploy/go_test_env.py status --host root@SERVER [--key KEY]
 
-Once Go is live, deploy_go.py parallel would rewrite the live unit, so this replaces it. The test unit
-(splatoon-nex-go-test, never enabled at boot) runs the binary built from this repository on UDP --test-port and
+The test unit (splatoon-nex-go-test, never enabled at boot) runs the binary built from this repository on UDP --test-port and
 --test-port + 1 (opened in ufw) and HTTP --test-port + 2 (server loopback only: ssh -L). Its server.json is the live
 one with integrity_mode log, no NAT check and a copy of the accounts database. The live unit, its server.json and its
 database are only read. Files stay in place after stop, a new install replaces them.
@@ -18,7 +17,7 @@ import shlex
 import sys
 import time
 
-from deploy_go import BINARY, GO_SERVICE, build
+from go_server import BINARY, build
 from remote import Target, add_target_args
 
 TEST_SERVICE = "splatoon-nex-go-test"
@@ -80,7 +79,7 @@ def active(target: Target, service: str) -> str:
 
 
 def status(target: Target, env: TestEnv) -> None:
-    print(f"live: {active(target, GO_SERVICE)} | test: {active(target, TEST_SERVICE)}")
+    print(f"live: {active(target, target.service)} | test: {active(target, TEST_SERVICE)}")
     print("live health:", target.health())
     print("test health:", target.ssh(f"curl -s -m 5 http://127.0.0.1:{env.port + 2}/health", check=False).strip() or "-")
     print("test UDP sockets:", target.ssh(f"ss -lunH | grep -cE ':({env.port}|{env.port + 1}) '", check=False).strip())

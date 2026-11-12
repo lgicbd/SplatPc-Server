@@ -11,11 +11,12 @@ def add_target_args(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("server to manage")
     group.add_argument("--host", required=True, help="SSH target, for example root@203.0.113.10")
     group.add_argument("--key", help="SSH private key (default: your ssh agent / ~/.ssh)")
-    group.add_argument("--remote-root", default="/opt/splatoon", help="folder holding tools/, server.json and venv/")
-    group.add_argument("--service", default="splatoon-nex", help="systemd unit name")
+    group.add_argument("--remote-root", default="/opt/splatoon", help="folder holding go/ and server.json")
+    group.add_argument("--service", default="splatoon-nex-go", help="systemd unit of the live server")
     group.add_argument("--user", default="splatoon", help="system user the service runs as")
     group.add_argument("--db", default="/var/lib/splatoon/accounts.sqlite3", help="accounts database path on the server")
-    group.add_argument("--remote-log", default="/var/log/splatoon/nexserver.log")
+    group.add_argument("--remote-log", default="/var/log/splatoon/nexserver-go.log")
+    group.add_argument("--remote-python", default="python3", help="Python on the server, only used to copy the SQLite database")
     group.add_argument("--domain", help="public domain, to check https://<domain>/health after a change")
     group.add_argument("--registration-port", type=int, default=60002, help="local HTTP port (never exposed)")
 
@@ -31,18 +32,11 @@ class Target:
         self.log = args.remote_log
         self.domain = args.domain
         self.local_port = args.registration_port
+        self.python = args.remote_python
 
     @property
     def config(self) -> str:
         return f"{self.root}/server.json"
-
-    @property
-    def code_dir(self) -> str:
-        return f"{self.root}/tools/nexlab"
-
-    @property
-    def python(self) -> str:
-        return f"{self.root}/venv/bin/python"
 
     def _ssh_options(self) -> list:
         options = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]

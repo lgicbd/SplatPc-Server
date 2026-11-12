@@ -9,9 +9,9 @@
 
 The release list given here REPLACES the whole "integrity_releases" object: repeat the hashes of the versions you still
 accept. The hashes come from `py -3 scripts/integrity.py --make` in the game repository (see docs/SERVEUR.md).
-The new file is checked by the server itself before use: the Go binary (--check-config) when Go is the live server,
-the Python code otherwise. The dry run does that check too, on a temporary copy that it removes. With --apply,
-server.json is backed up first (server.json.bak-<stamp>). When Go is live its unit is the one restarted.
+The new file is checked by the Go binary itself (--check-config) before use. The dry run does that check too, on a
+temporary copy that it removes. With --apply, server.json is backed up first (server.json.bak-<stamp>), then the unit
+(--service) is restarted.
 """
 import argparse
 import json
@@ -19,7 +19,7 @@ import re
 import sys
 import time
 
-from deploy_go import GO_SERVICE, Go, go_is_live
+from go_server import Go
 from remote import Target, add_target_args
 
 
@@ -53,31 +53,26 @@ def main() -> None:
     run(target, args.mode, args.release, args.min_client_version, args.apply)
 
 
-def checked(target: Target, go: Go, live: bool, path: str) -> None:
+def checked(target: Target, go: Go, path: str) -> None:
     """Stops (non-zero exit of the remote command) when the server would refuse this file."""
-    if live:
-        # stderr is kept apart: Target.ssh shows it when the binary refuses the file
-        print("config check:", target.ssh(go.as_service_user(f"{go.binary} --config {path} --check-config")).strip())
-    else:
-        target.ssh(f"cd {target.code_dir} && {target.python} -c \"import server_config; "
-                   f"c=server_config.ServerConfig.load('{path}'); print(c.integrity_mode, sorted(c.integrity_releases))\"")
+    # stderr is kept apart: Target.ssh shows it when the binary refuses the file
+    print("config check:", target.ssh(go.as_service_user(f"{go.binary} --config {path} --check-config")).strip())
 
 
 def run(target: Target, mode: str, release: str, min_client_version: str, apply: bool) -> None:
-    go = Go(target, 0)
-    live = go_is_live(target, go)
-    service = GO_SERVICE if live else target.service
+    go = Go(target)
+    service = target.service
     before = json.loads(target.ssh(f"cat {target.config}"))
     config = edited(before, mode, release, min_client_version)
     for key in ("integrity_mode", "integrity_releases", "min_client_version"):   # never the other keys: some are secret
         print(f"{key}: {json.dumps(before.get(key))} -> {json.dumps(config.get(key))}")
-    print("server:", "Go" if live else "Python", "| unit:", service)
+    print("unit:", service)
 
     new, stamp = f"{target.config}.new", time.strftime("%Y%m%d-%H%M%S")
     write = f"cat > {new} && chmod --reference={target.config} {new} && chown --reference={target.config} {new}"
     target.ssh(write, stdin=json.dumps(config, indent=1))
     try:
-        checked(target, go, live, new)
+        checked(target, go, new)
     except SystemExit:
         target.ssh(f"rm -f {new}", check=False)
         raise

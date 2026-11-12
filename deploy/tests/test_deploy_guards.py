@@ -1,13 +1,13 @@
-"""Deploy scripts must never touch the live Go server by mistake (no SSH: a fake target answers).
-    py -3.12 -m unittest tools.tests.test_deploy_guards -v
+"""The test server of go_test_env.py must never share a path, port or unit with the live Go server (no SSH).
+    py -3 -m unittest discover -s deploy/tests -v
 """
 import argparse
 import pathlib
 import sys
 import unittest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "deploy"))
-import deploy_go  # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+import go_server  # noqa: E402
 import go_test_env  # noqa: E402
 from remote import Target, add_target_args  # noqa: E402
 
@@ -18,45 +18,14 @@ def make_target() -> Target:
     return Target(parser.parse_args(["--host", "root@203.0.113.10"]))
 
 
-class FakeTarget:
-    """Records each command; the live flag exists when live is true."""
-
-    def __init__(self, live: bool):
-        self.real = make_target()
-        self.live, self.commands = live, []
-
-    def __getattr__(self, name):
-        return getattr(self.real, name)
-
-    def ssh(self, command, check=True, stdin=None):
-        self.commands.append(command)
-        return "live\n" if self.live and command.startswith("test -e") else ""
-
-
-class ParallelGuardTests(unittest.TestCase):
-    def test_parallel_refuses_when_go_is_live_and_runs_nothing_else(self):
-        target = FakeTarget(live=True)
-        with self.assertRaises(SystemExit) as stopped:
-            deploy_go.parallel(target, deploy_go.Go(target, 60100))
-        self.assertIn("go_test_env.py", str(stopped.exception))
-        self.assertEqual(len(target.commands), 1)
-        self.assertTrue(target.commands[0].startswith("test -e /opt/splatoon/go/live"))
-
-    def test_stop_parallel_still_refuses_when_go_is_live(self):
-        target = FakeTarget(live=True)
-        with self.assertRaises(SystemExit):
-            deploy_go.stop_parallel(target, deploy_go.Go(target, 60100))
-        self.assertEqual(len(target.commands), 1)
-
-
 class TestEnvTests(unittest.TestCase):
     def setUp(self):
         self.target = make_target()
         self.env = go_test_env.TestEnv(self.target, 60100)
-        self.go = deploy_go.Go(self.target, 60100)
+        self.go = go_server.Go(self.target)
 
     def test_paths_and_unit_never_are_the_live_ones(self):
-        self.assertNotEqual(go_test_env.TEST_SERVICE, deploy_go.GO_SERVICE)
+        self.assertNotEqual(go_test_env.TEST_SERVICE, self.target.service)
         for test_path, live_path in ((self.env.dir, self.go.dir), (self.env.config, self.target.config),
                                      (self.env.config, self.go.config), (self.env.db, self.target.db),
                                      (self.env.log, self.go.log), (self.env.binary, self.go.binary)):
