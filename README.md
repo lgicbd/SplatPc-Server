@@ -50,7 +50,7 @@ unknown key is an error. A public server (the addresses are documentation addres
 | `natcheck`, `natcheck_addresses` | answer NAT checks, on these two public IPs (UDP 10025 and 10125 on each) |
 | `accounts_db` | SQLite file of the accounts |
 | `registration` | `closed` (default), `token` (needs `registration_token`) or `open` |
-| `registration_port` | local HTTP port of sign-up, friends and admin (default `auth_port + 2`) |
+| `registration_port` | local HTTP port of sign-up, friends and admin (default `auth_port + 2`; none when registration is `closed`) |
 | `registration_proxy` | the HTTP endpoint sits behind your reverse proxy |
 | `admin_token` | token for the `ops` administration commands |
 | `min_client_version` | oldest game version allowed to play, shown in `/health`; format `0.1.0` |
