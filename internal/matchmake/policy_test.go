@@ -140,8 +140,8 @@ func TestProbeTargetsMustShareASession(t *testing.T) {
 func TestProbeStationMustBeAnAddressOfTheCaller(t *testing.T) {
 	m := New(Options{Public: true})
 	conn, _ := connection(m, 1, "203.0.113.5:50000")
-	m.stations[1] = []*station.URL{url(t, "prudp:/address=192.168.1.20")}
-	for address, want := range map[string]bool{"203.0.113.5": true, "192.168.1.20": true, "": true, "198.51.100.77": false} {
+	m.stations[1] = []*station.URL{url(t, "prudp:/address=192.0.2.20")}
+	for address, want := range map[string]bool{"203.0.113.5": true, "192.0.2.20": true, "": true, "198.51.100.77": false} {
 		probe := station.New("prudp")
 		probe.Set("address", address)
 		if m.probeAllowed(conn, probe) != want {
@@ -268,7 +268,7 @@ func TestRegisterForgetsWhatThePreviousSessionLearned(t *testing.T) {
 
 func TestLoopbackPIAURLIsRewrittenToThePacketSource(t *testing.T) {
 	m := New(Options{Public: true})
-	conn, _ := connection(m, 1, "192.168.1.8:5000")
+	conn, _ := connection(m, 1, "192.0.2.8:5000")
 	registered := url(t, "prudp:/address=127.0.0.1;port=57285;type=2")
 	out := nexstream.NewWriter(true)
 	if err := m.register(conn, []*station.URL{registered}, out); err != nil {
@@ -277,11 +277,11 @@ func TestLoopbackPIAURLIsRewrittenToThePacketSource(t *testing.T) {
 	in := nexstream.NewReader(out.Bytes(), true)
 	in.U32()
 	in.U32()
-	if public := readStation(in); public.Get("address") != "192.168.1.8" {
+	if public := readStation(in); public.Get("address") != "192.0.2.8" {
 		t.Fatalf("public %s", public)
 	}
 	stored := m.stations[1][0]
-	if stored.Get("address") != "192.168.1.8" || stored.Int("port") != 57285 {
+	if stored.Get("address") != "192.0.2.8" || stored.Int("port") != 57285 {
 		t.Fatalf("stored %s", stored)
 	}
 
@@ -294,7 +294,7 @@ func TestLoopbackPIAURLIsRewrittenToThePacketSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	stored = m.stations[1][0]
-	if stored.Get("address") != "192.168.1.8" || stored.Int("port") != 51534 || stored.Int("type") != 3 {
+	if stored.Get("address") != "192.0.2.8" || stored.Int("port") != 51534 || stored.Int("type") != 3 {
 		t.Fatalf("replaced %s", stored)
 	}
 }
