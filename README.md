@@ -4,7 +4,7 @@ The online server for the [Splatoon 1 PC port](https://github.com/PC-PORTERS/Spl
 matchmaking, NAT test, friends and sign-up over HTTP. Matches themselves are peer-to-peer.
 It replaces Nintendo's servers and contains or reads no Nintendo content.
 
-The server is one Go binary (`cmd/splatoon-nex`). Full hosting guide: [docs/SERVEUR.md](docs/SERVEUR.md); Linux
+The server is one Go binary (`cmd/splatoon-nex`); it is the one the community server runs, with real players. Full hosting guide: [docs/SERVEUR.md](docs/SERVEUR.md); Linux
 scripts and systemd unit: [deploy/](deploy/README.md).
 
 ## Requirements
@@ -56,6 +56,8 @@ unknown key is an error. A public server (the addresses are documentation addres
 | `min_client_version` | oldest game version allowed to play, shown in `/health`; format `0.1.0` |
 | `integrity_mode` | `off` (default), `log` or `enforce`, see below |
 | `integrity_releases` | accepted releases: a version, then one or several release hashes |
+
+`/health` also shows `latest_version`: it is not a key of its own, but the highest version listed in `integrity_releases`.
 
 The remaining keys are `registration_token`, `fill_timeout`, `random_session_key`, `natcheck_single_ip`,
 `natcheck_same_socket`, `identities` and `identity_roots`. Check a file without starting anything:
