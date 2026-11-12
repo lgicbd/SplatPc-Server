@@ -16,3 +16,12 @@ __pycache__/
 
 # Test output
 /build/
+
+# Local copies and backups of the configuration, databases, rotated logs
+server.json.*
+*.sqlite
+*.db
+*.db-*
+*.log.*
+.env
+.env.*
