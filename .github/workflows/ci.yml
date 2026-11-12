@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   go:
-    name: Vet & Test (Go)
+    name: Vet & Test (Go, deploy scripts)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -19,3 +19,4 @@ jobs:
           go-version-file: go.mod
       - run: go vet ./...
       - run: go test ./...
+      - run: python3 -m unittest discover -s deploy/tests

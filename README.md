@@ -4,11 +4,8 @@ The online server for the [Splatoon 1 PC port](https://github.com/PC-PORTERS/Spl
 matchmaking, NAT test, friends and sign-up over HTTP. Matches themselves are peer-to-peer.
 It replaces Nintendo's servers and contains or reads no Nintendo content.
 
-Two implementations live here, with the same configuration file:
-
-- **Go** (`cmd/splatoon-nex`): the server to build and run. Its tests pass; the check with the real game is still
-  open, see [docs/MIGRATION-GO.md](docs/MIGRATION-GO.md).
-- **Python** (`tools/nexlab`): the original server, still the reference. Steps: [docs/SERVEUR.md](docs/SERVEUR.md).
+The server is one Go binary (`cmd/splatoon-nex`). Full hosting guide: [docs/SERVEUR.md](docs/SERVEUR.md); Linux
+scripts and systemd unit: [deploy/](deploy/README.md).
 
 ## Requirements
 
@@ -20,7 +17,7 @@ Two implementations live here, with the same configuration file:
 ## Build
 
 ```
-go build -o splatoon-nex ./cmd/splatoon-nex
+go build -trimpath -o splatoon-nex ./cmd/splatoon-nex
 ```
 
 ## Configure
@@ -130,7 +127,7 @@ go vet ./...
 go test ./...
 ```
 
-The Python tests: `py -3.12 -m unittest discover -s tools/tests -p "test_*.py"`.
+The deploy scripts have their own tests: `py -3 -m unittest discover -s deploy/tests`.
 
 ## Privacy
 
