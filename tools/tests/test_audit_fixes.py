@@ -159,10 +159,10 @@ class ProbePolicyTests(unittest.TestCase):
             def remote_address(self):
                 return ("203.0.113.5", 50000)
 
-        matchmake.STATIONS[0x10000001] = [{"address": "192.168.1.20"}]
+        matchmake.STATIONS[0x10000001] = [{"address": "192.0.2.20"}]
         ok = matchmake._probe_station_allowed
         self.assertTrue(ok(Client(), {"address": "203.0.113.5"}))        # where the packets come from
-        self.assertTrue(ok(Client(), {"address": "192.168.1.20"}))       # an address it registered
+        self.assertTrue(ok(Client(), {"address": "192.0.2.20"}))       # an address it registered
         self.assertTrue(ok(Client(), {"address": ""}))
         self.assertFalse(ok(Client(), {"address": "198.51.100.77"}))     # somebody else's address
 

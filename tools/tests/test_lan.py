@@ -47,7 +47,7 @@ class SearchCriteriaTests(unittest.TestCase):
 
 
 class FakeClient:
-    def __init__(self, pid=0x5EEA2491, address=("192.168.1.8", 5000)):
+    def __init__(self, pid=0x5EEA2491, address=("192.0.2.8", 5000)):
         self._pid, self._address = pid, address
 
     def pid(self):
@@ -72,9 +72,9 @@ class PublicStationAddressTests(unittest.TestCase):
         server = nexserver.SecureServer("public")
         url = matchmake.common.StationURL("prudp", address="127.0.0.1", port=57285, type=2)
         answer = server.answer(FakeClient(), [url])
-        self.assertEqual(answer.public_station["address"], "192.168.1.8")
+        self.assertEqual(answer.public_station["address"], "192.0.2.8")
         stored = matchmake.STATIONS[0x5EEA2491][0]
-        self.assertEqual((stored["address"], stored["port"]), ("192.168.1.8", 57285))
+        self.assertEqual((stored["address"], stored["port"]), ("192.0.2.8", 57285))
 
         # The game's ReplaceURL still carries 127.0.0.1: it must match by port and type and
         # keep the public address for peers.
@@ -84,7 +84,7 @@ class PublicStationAddressTests(unittest.TestCase):
         asyncio.run(server.replace_url(FakeClient(), url, replacement))
         stored = matchmake.STATIONS[0x5EEA2491][0]
         self.assertEqual((stored["address"], stored["port"], stored["type"]),
-                         ("192.168.1.8", 51534, 3))
+                         ("192.0.2.8", 51534, 3))
 
     def test_lab_mode_keeps_the_registered_address(self):
         server = nexserver.SecureServer("lab")
