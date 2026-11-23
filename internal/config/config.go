@@ -36,10 +36,13 @@ var (
 	hashRE    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	fields    = []string{"mode", "listen", "advertise", "auth_port", "secure_port", "natcheck",
 		"natcheck_addresses", "identities", "identity_roots",
-		"accounts_db", "registration", "registration_port", "registration_token",
+		"accounts_db", "registration", "registration_port", "registration_listen", "registration_token",
 		"fill_timeout", "natcheck_single_ip", "natcheck_same_socket", "registration_proxy",
 		"min_client_version", "random_session_key", "admin_token",
-		"integrity_mode", "integrity_releases"}
+		"integrity_mode", "integrity_releases",
+		"wireguard_enabled", "wireguard_interface", "wireguard_endpoint", "wireguard_subnet",
+		"wireguard_server_ip", "wireguard_listen_port", "wireguard_private_key_file",
+		"wireguard_iptables", "wireguard_mtu", "wireguard_keepalive"}
 )
 
 // Error is a configuration value that is missing, out of range, or inconsistent.
@@ -69,11 +72,23 @@ type Config struct {
 	AccountsDB         string
 	Registration       string
 	RegistrationPort   int
+	RegistrationListen string
 	RegistrationToken  string
 	AdminToken         string
 	IntegrityMode      string
 	IntegrityReleases  map[string][]string
 	FillTimeout        float64
+
+	WireGuardEnabled        bool
+	WireGuardInterface      string
+	WireGuardEndpoint       string
+	WireGuardSubnet         string
+	WireGuardServerIP       string
+	WireGuardListenPort     int
+	WireGuardPrivateKeyFile string
+	WireGuardIPTables       bool
+	WireGuardMTU            int
+	WireGuardKeepalive      int
 
 	provided map[string]bool
 }
@@ -151,6 +166,12 @@ func New(values map[string]any) (*Config, error) {
 	}
 	if value, ok := values["registration_token"]; ok && value != nil {
 		c.RegistrationToken = jsonval.Str(value)
+	}
+	if value, ok := values["registration_listen"]; ok && value != nil {
+		c.RegistrationListen = strings.TrimSpace(jsonval.Str(value))
+	}
+	if err := c.setWireGuard(values); err != nil {
+		return nil, err
 	}
 	c.FillTimeout = 20
 	if value, ok := values["fill_timeout"]; ok {
@@ -328,6 +349,94 @@ func (c *Config) validate(listen any, values map[string]any) error {
 	if c.RegistrationPort < 1 || c.RegistrationPort > 65535 {
 		return errorf("registration_port: %d is outside 1..65535", c.RegistrationPort)
 	}
+	if c.RegistrationListen != "" && !isWildcard(c.RegistrationListen) {
+		addr, err := canonicalIP(c.RegistrationListen, "registration_listen")
+		if err != nil {
+			return err
+		}
+		c.RegistrationListen = addr
+	}
+	if err := c.validateWireGuard(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Config) setWireGuard(values map[string]any) error {
+	c.WireGuardEnabled = jsonval.Truthy(values["wireguard_enabled"])
+	c.WireGuardInterface = "wg0"
+	if v, ok := values["wireguard_interface"]; ok && v != nil {
+		c.WireGuardInterface = strings.TrimSpace(jsonval.Str(v))
+	}
+	if v, ok := values["wireguard_endpoint"]; ok && v != nil {
+		c.WireGuardEndpoint = strings.TrimSpace(jsonval.Str(v))
+	}
+	c.WireGuardSubnet = "10.66.0.0/16"
+	if v, ok := values["wireguard_subnet"]; ok && v != nil {
+		c.WireGuardSubnet = strings.TrimSpace(jsonval.Str(v))
+	}
+	c.WireGuardServerIP = "10.66.0.1"
+	if v, ok := values["wireguard_server_ip"]; ok && v != nil {
+		c.WireGuardServerIP = strings.TrimSpace(jsonval.Str(v))
+	}
+	var err error
+	if v, ok := values["wireguard_listen_port"]; ok && v != nil {
+		if c.WireGuardListenPort, err = port(v, "wireguard_listen_port"); err != nil {
+			return err
+		}
+	} else {
+		c.WireGuardListenPort = 51820
+	}
+	if v, ok := values["wireguard_private_key_file"]; ok && v != nil {
+		c.WireGuardPrivateKeyFile = strings.TrimSpace(jsonval.Str(v))
+	}
+	if v, ok := values["wireguard_iptables"]; ok && v != nil {
+		c.WireGuardIPTables = jsonval.Truthy(v)
+	} else {
+		c.WireGuardIPTables = true
+	}
+	c.WireGuardMTU = 1420
+	if v, ok := values["wireguard_mtu"]; ok && v != nil {
+		n, ok := jsonval.Int(v)
+		if !ok || n < 576 || n > 65535 {
+			return errorf("wireguard_mtu: must be in 576..65535")
+		}
+		c.WireGuardMTU = int(n)
+	}
+	c.WireGuardKeepalive = 25
+	if v, ok := values["wireguard_keepalive"]; ok && v != nil {
+		n, ok := jsonval.Int(v)
+		if !ok || n < 0 || n > 65535 {
+			return errorf("wireguard_keepalive: must be in 0..65535")
+		}
+		c.WireGuardKeepalive = int(n)
+	}
+	return nil
+}
+
+func (c *Config) validateWireGuard() error {
+	if !c.WireGuardEnabled {
+		return nil
+	}
+	if c.WireGuardInterface == "" || strings.ContainsAny(c.WireGuardInterface, " \t\r\n/") {
+		return errorf("wireguard_interface: invalid interface name %q", c.WireGuardInterface)
+	}
+	prefix, err := netip.ParsePrefix(c.WireGuardSubnet)
+	if err != nil || !prefix.Addr().Is4() {
+		return errorf("wireguard_subnet: '%s' must be an IPv4 CIDR (e.g. 10.66.0.0/16)", c.WireGuardSubnet)
+	}
+	c.WireGuardSubnet = prefix.Masked().String()
+	serverIP, err := netip.ParseAddr(c.WireGuardServerIP)
+	if err != nil || !serverIP.Is4() || !prefix.Contains(serverIP) {
+		return errorf("wireguard_server_ip: '%s' must be an IPv4 address inside %s", c.WireGuardServerIP, c.WireGuardSubnet)
+	}
+	c.WireGuardServerIP = serverIP.String()
+	if c.WireGuardEndpoint == "" && c.StationHost() != "" {
+		c.WireGuardEndpoint = fmt.Sprintf("%s:%d", c.StationHost(), c.WireGuardListenPort)
+	}
+	if c.WireGuardEndpoint == "" {
+		return errorf("wireguard_endpoint: required when wireguard_enabled is true and advertise is empty")
+	}
 	return nil
 }
 
@@ -431,6 +540,19 @@ func (c *Config) values() map[string]any {
 		"natcheck_single_ip": c.NatcheckSingleIP, "natcheck_same_socket": c.NatcheckSameSocket,
 		"registration_proxy": c.RegistrationProxy, "random_session_key": c.RandomSessionKey,
 		"integrity_mode": c.IntegrityMode, "registration_port": c.RegistrationPort,
+		"wireguard_enabled": c.WireGuardEnabled, "wireguard_interface": c.WireGuardInterface,
+		"wireguard_subnet": c.WireGuardSubnet, "wireguard_server_ip": c.WireGuardServerIP,
+		"wireguard_listen_port": c.WireGuardListenPort, "wireguard_iptables": c.WireGuardIPTables,
+		"wireguard_mtu": c.WireGuardMTU, "wireguard_keepalive": c.WireGuardKeepalive,
+	}
+	if c.RegistrationListen != "" {
+		values["registration_listen"] = c.RegistrationListen
+	}
+	if c.WireGuardEndpoint != "" {
+		values["wireguard_endpoint"] = c.WireGuardEndpoint
+	}
+	if c.WireGuardPrivateKeyFile != "" {
+		values["wireguard_private_key_file"] = c.WireGuardPrivateKeyFile
 	}
 	if c.Advertise != "" {
 		values["advertise"] = c.Advertise
