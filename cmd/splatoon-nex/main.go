@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
@@ -22,6 +23,7 @@ import (
 	"github.com/lgicbd/SplatPc-Server/internal/nex"
 	"github.com/lgicbd/SplatPc-Server/internal/rmc"
 	"github.com/lgicbd/SplatPc-Server/internal/social"
+	"github.com/lgicbd/SplatPc-Server/internal/wireguard"
 )
 
 const defaultIdleTimeout = 60 * time.Second
@@ -166,6 +168,7 @@ func serve(cfg *config.Config, seconds float64) error {
 	var (
 		store    *accounts.Store
 		endpoint *httpapi.Server
+		wgMgr    *wireguard.Manager
 		err      error
 		attested func(uint32) bool
 		nat      *natcheck.Server
@@ -180,6 +183,11 @@ func serve(cfg *config.Config, seconds float64) error {
 	}
 	options := matchmake.Options{Public: cfg.IsPublic(), FillTimeout: cfg.FillTimeout,
 		RandomSessionKey: cfg.RandomSessionKey, LANPublic: os.Getenv("NEXLAB_LAN_PUBLIC")}
+	if cfg.WireGuardEnabled {
+		if subnet, parseErr := netip.ParsePrefix(cfg.WireGuardSubnet); parseErr == nil {
+			options.WireGuardSubnet = subnet
+		}
+	}
 	if nat != nil {
 		options.NAT = nat
 	}
@@ -193,17 +201,25 @@ func serve(cfg *config.Config, seconds float64) error {
 		defer store.Close()
 		count, _ := store.Count()
 		logx.Infof("accounts: %d in %s (registration %s, port %d)", count, cfg.AccountsDB, cfg.Registration, cfg.RegistrationPort)
+		if cfg.WireGuardEnabled {
+			wgMgr, err = startWireGuard(cfg, store)
+			if err != nil {
+				return fmt.Errorf("wireguard: %w", err)
+			}
+		}
 		if cfg.Registration != "closed" {
 			friends := social.New(store, nil, cfg.IntegrityMode, cfg.IntegrityReleases)
 			attested = friends.IsAttested
-			httpOptions := httpapi.Options{Accounts: store, Social: friends, Live: live{matchmaker},
+			httpOptions := httpapi.Options{Accounts: store, Social: friends, Live: live{matchmaker}, WG: wgMgr,
 				AdminToken: cfg.AdminToken, BehindProxy: cfg.RegistrationProxy, MinClientVersion: cfg.MinClientVersion}
 			if cfg.Registration == "token" {
 				httpOptions.Token = cfg.RegistrationToken
 			}
 			endpoint = httpapi.New(httpOptions)
 			host := cfg.Listen
-			if cfg.RegistrationProxy {
+			if cfg.RegistrationListen != "" {
+				host = cfg.RegistrationListen
+			} else if cfg.RegistrationProxy {
 				host = "127.0.0.1"
 			} else if wildcard(host) {
 				host = "0.0.0.0"
@@ -233,4 +249,59 @@ func serve(cfg *config.Config, seconds float64) error {
 	<-ctx.Done()
 	logx.Infof("server stopped")
 	return nil
+}
+
+func startWireGuard(cfg *config.Config, store *accounts.Store) (*wireguard.Manager, error) {
+	subnet, err := netip.ParsePrefix(cfg.WireGuardSubnet)
+	if err != nil {
+		return nil, err
+	}
+	serverIP, err := netip.ParseAddr(cfg.WireGuardServerIP)
+	if err != nil {
+		return nil, err
+	}
+	nncs2IP, err := netip.ParseAddr(cfg.WireGuardNNCS2IP)
+	if err != nil {
+		nncs2IP = serverIP
+	}
+	ports := []int{cfg.AuthPort, cfg.SecurePort}
+	if cfg.Natcheck {
+		ports = append(ports, natcheck.Ports...)
+	}
+	mgr := wireguard.New(wireguard.Config{
+		Interface:       cfg.WireGuardInterface,
+		Endpoint:        cfg.WireGuardEndpoint,
+		Subnet:          subnet,
+		ServerIP:        serverIP,
+		NNCS2IP:         nncs2IP,
+		ListenPort:      cfg.WireGuardListenPort,
+		PrivateKeyFile:  cfg.WireGuardPrivateKeyFile,
+		EnableIPTables:  cfg.WireGuardIPTables,
+		AllowedUDPPorts: ports,
+		MTU:             cfg.WireGuardMTU,
+		Keepalive:       cfg.WireGuardKeepalive,
+	}, nil)
+	if err := mgr.EnsureSetup(); err != nil {
+		return nil, err
+	}
+	if err := mgr.FlushBans(); err != nil {
+		logx.Warnf("wireguard: flush bans: %v", err)
+	}
+	peers, err := store.ListWGPeers()
+	if err != nil {
+		return nil, err
+	}
+	for _, peer := range peers {
+		pid := peer.PID
+		banned, err := store.IsBanned(&pid, "")
+		if err != nil {
+			return nil, err
+		}
+		if banned {
+			_ = mgr.BanPeer(peer.PublicKey, peer.AssignedIP)
+		} else if err := mgr.AllowPeer(peer.PublicKey, peer.AssignedIP); err != nil {
+			logx.Warnf("wireguard: restore peer pid %08x (%s): %v", peer.PID, peer.AssignedIP, err)
+		}
+	}
+	return mgr, nil
 }

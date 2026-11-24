@@ -9,6 +9,7 @@ package matchmake
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"net/netip"
 	"slices"
 	"sync"
 	"time"
@@ -47,7 +48,8 @@ type Options struct {
 	Public           bool
 	FillTimeout      float64 // seconds, 0 for the default
 	RandomSessionKey bool
-	LANPublic        string // public address for players on the server's own LAN
+	LANPublic        string       // public address for players on the server's own LAN
+	WireGuardSubnet  netip.Prefix // when valid, peers inside this subnet always advertise their WG IP
 	NAT              NATObservations
 }
 

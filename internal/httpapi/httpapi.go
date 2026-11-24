@@ -24,6 +24,7 @@ import (
 	"github.com/lgicbd/SplatPc-Server/internal/jsonval"
 	"github.com/lgicbd/SplatPc-Server/internal/logx"
 	"github.com/lgicbd/SplatPc-Server/internal/social"
+	"github.com/lgicbd/SplatPc-Server/internal/wireguard"
 )
 
 const (
@@ -61,6 +62,7 @@ type Options struct {
 	Accounts         *accounts.Store
 	Social           *social.Social
 	Live             Live
+	WG               *wireguard.Manager
 	Token            string // registration token, "" for none
 	AdminToken       string // defaults to Token; without any, the operator routes do not exist
 	BehindProxy      bool
@@ -188,7 +190,10 @@ func (s *Server) clientIP(r *http.Request) string {
 	if err != nil {
 		peer = r.RemoteAddr
 	}
-	if !s.BehindProxy || (peer != "127.0.0.1" && peer != "::1") {
+	peerAddr, peerErr := netip.ParseAddr(peer)
+	inWG := peerErr == nil && s.WG != nil && s.WG.Config().Subnet.Contains(peerAddr)
+	trustedPeer := peerErr == nil && !inWG && (peerAddr.IsLoopback() || peerAddr.IsPrivate())
+	if !s.BehindProxy || !trustedPeer {
 		return peer
 	}
 	var last string
@@ -210,7 +215,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		route := r.URL.Path
 		switch {
-		case strings.HasPrefix(route, "/social/"):
+		case strings.HasPrefix(route, "/social/") || route == "/wg/key":
 			s.socialRoute(w, r, route)
 		case route == "/admin/ban" || route == "/admin/unban":
 			s.adminPost(w, r, route)
@@ -387,6 +392,8 @@ func (s *Server) socialRoute(w http.ResponseWriter, r *http.Request, route strin
 	case "/social/cancel":
 		err = s.Social.CancelRequest(text(payload, "token", "None"), payload["pid"])
 		result = map[string]bool{"ok": true}
+	case "/social/wg", "/wg/key":
+		result, err = s.wgKey(payload, ip)
 	default:
 		replyError(w, http.StatusNotFound, "not found")
 		return
@@ -456,7 +463,7 @@ func (s *Server) adminPost(w http.ResponseWriter, r *http.Request, route string)
 	if route == "/admin/ban" {
 		err = s.ban(pid, ip, payload)
 	} else {
-		err = s.Accounts.Unban(pid, ip)
+		err = s.unban(pid, ip)
 	}
 	switch {
 	case err == nil:
@@ -485,8 +492,113 @@ func (s *Server) ban(pid *uint32, ip string, payload map[string]any) error {
 		if s.Social != nil {
 			s.Social.Revoke(*pid)
 		}
+		if s.WG != nil {
+			if peer, wgErr := s.Accounts.GetWGPeer(*pid); wgErr != nil {
+				logx.Errorf("wireguard: lookup peer for ban pid %08x: %v", *pid, wgErr)
+			} else if peer != nil {
+				if wgErr := s.WG.BanPeer(peer.PublicKey, peer.AssignedIP); wgErr != nil {
+					logx.Errorf("wireguard: ban peer pid %08x (%s): %v", *pid, peer.AssignedIP, wgErr)
+				}
+			}
+		}
 	}
 	return nil
+}
+
+func (s *Server) unban(pid *uint32, ip string) error {
+	if err := s.Accounts.Unban(pid, ip); err != nil {
+		return err
+	}
+	if pid != nil && s.WG != nil {
+		if peer, wgErr := s.Accounts.GetWGPeer(*pid); wgErr == nil && peer != nil {
+			s.WG.UnbanIP(peer.AssignedIP)
+		}
+	}
+	return nil
+}
+
+// wgKey authenticates the player (by session token or pid+password), verifies they are not
+// banned, allocates/updates their WireGuard peer IP, and returns the tunnel configuration.
+func (s *Server) wgKey(payload map[string]any, ip string) (any, error) {
+	if s.WG == nil {
+		return nil, &social.Error{Status: http.StatusNotImplemented, Message: "wireguard p2p is not enabled"}
+	}
+	var pid uint32
+	if token := strings.TrimSpace(text(payload, "token", "")); token != "" && token != "None" {
+		pid = s.Social.PIDOf(token)
+		if pid == 0 {
+			return nil, &social.Error{Status: http.StatusUnauthorized, Message: "invalid or expired session token"}
+		}
+	} else {
+		if !s.Social.AllowAuth(ip) {
+			return nil, &social.Error{Status: http.StatusTooManyRequests, Message: "too many attempts, try again later"}
+		}
+		parsed, err := accounts.ParsePID(jsonval.Str(payload["pid"]))
+		if err != nil {
+			return nil, err
+		}
+		if !s.Accounts.Verify(parsed, text(payload, "password", "")) {
+			return nil, &accounts.InvalidIdentityError{Message: "unknown player or wrong password"}
+		}
+		pid = parsed
+	}
+
+	banned, err := s.Accounts.IsBanned(&pid, ip)
+	if err != nil {
+		return nil, err
+	}
+	if banned {
+		return nil, &social.Error{Status: http.StatusForbidden, Message: "this player or address is banned"}
+	}
+
+	var generatedPriv string
+	pubKey := strings.TrimSpace(text(payload, "public_key", ""))
+	if pubKey == "" {
+		priv, pub, err := wireguard.GenerateKeypair()
+		if err != nil {
+			return nil, err
+		}
+		generatedPriv = priv
+		pubKey = pub
+	} else {
+		validated, err := wireguard.ValidatePublicKey(pubKey)
+		if err != nil {
+			return nil, &social.Error{Status: http.StatusBadRequest, Message: err.Error()}
+		}
+		pubKey = validated
+	}
+
+	cfg := s.WG.Config()
+	peer, err := s.Accounts.AssignWGPeer(pid, pubKey, cfg.Subnet, cfg.ServerIP, cfg.NNCS2IP)
+	if err != nil {
+		if accounts.IsInvalidIdentity(err) {
+			return nil, &social.Error{Status: http.StatusConflict, Message: err.Error()}
+		}
+		return nil, err
+	}
+	if err := s.WG.AllowPeer(peer.PublicKey, peer.AssignedIP); err != nil {
+		return nil, err
+	}
+
+	nncs2IP := cfg.NNCS2IP
+	if !nncs2IP.IsValid() {
+		nncs2IP = cfg.ServerIP
+	}
+	reply := map[string]any{
+		"client_ip":            peer.AssignedIP,
+		"subnet":               cfg.Subnet.String(),
+		"server_ip":            cfg.ServerIP.String(),
+		"nncs2_ip":             nncs2IP.String(),
+		"server_public_key":    s.WG.ServerPublicKey(),
+		"endpoint":             cfg.Endpoint,
+		"allowed_ips":          cfg.Subnet.String(),
+		"persistent_keepalive": cfg.Keepalive,
+		"mtu":                  cfg.MTU,
+	}
+	if generatedPriv != "" {
+		reply["private_key"] = generatedPriv
+	}
+	return reply, nil
 }
 
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {

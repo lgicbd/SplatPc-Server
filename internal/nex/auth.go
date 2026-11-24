@@ -2,6 +2,7 @@ package nex
 
 import (
 	"fmt"
+	"net/netip"
 	"strconv"
 	"time"
 
@@ -31,6 +32,9 @@ type auth struct {
 	secureKey  []byte
 	station    string
 	lanStation string // for players on the server's own LAN; "" when there is none
+	wgSubnet   netip.Prefix
+	wgStation  string
+	wgStrict   bool
 	accounts   *accounts.Store
 	attested   func(uint32) bool // nil: no integrity check
 	identities []string
@@ -130,7 +134,12 @@ func (a *auth) answer(c *rmc.Conn, username string, out *nexstream.Writer) error
 	if err != nil {
 		return err
 	}
-	origin := c.RemoteAddr().Addr().String()
+	originAddr := c.RemoteAddr().Addr()
+	origin := originAddr.String()
+	if a.wgSubnet.IsValid() && a.wgStrict && !a.wgSubnet.Contains(originAddr) {
+		logx.Warnf("non-WireGuard NEX login refused from %s (wireguard_strict=true)", origin)
+		return rmc.Refuse(rmc.InvalidUsername)
+	}
 	key, err := a.userKey(pid, origin)
 	if err != nil {
 		return err
@@ -140,7 +149,9 @@ func (a *auth) answer(c *rmc.Conn, username string, out *nexstream.Writer) error
 		return err
 	}
 	station := a.station
-	if a.lanStation != "" && matchmake.IsPrivate(origin) {
+	if a.wgSubnet.IsValid() && a.wgSubnet.Contains(originAddr) && a.wgStation != "" {
+		station = a.wgStation
+	} else if a.lanStation != "" && matchmake.IsPrivate(origin) {
 		station = a.lanStation
 	}
 	out.U32(rmc.Success)

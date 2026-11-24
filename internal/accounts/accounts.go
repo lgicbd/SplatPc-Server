@@ -161,6 +161,7 @@ func createSchema(db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS pseudos (pid INTEGER PRIMARY KEY, pseudo TEXT NOT NULL, pkey TEXT NOT NULL UNIQUE)`,
 		`CREATE TABLE IF NOT EXISTS bans (pid INTEGER, ip TEXT, reason TEXT, created REAL NOT NULL, UNIQUE(pid, ip))`,
 		`CREATE TABLE IF NOT EXISTS mod_log (at REAL NOT NULL, action TEXT NOT NULL, pid INTEGER, ip TEXT, detail TEXT)`,
+		createWGPeers,
 		createFriendRequests, // the Python server ignores this table, so going back to it stays possible
 		createFriendRequestsIndex,
 	} {

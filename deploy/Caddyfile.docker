@@ -1,0 +1,5 @@
+{$SPLATOON_DOMAIN} {
+	@ok path /register /health /social/* /wg/key
+	reverse_proxy @ok splatoon-nex:60002
+	respond 404
+}
