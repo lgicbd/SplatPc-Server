@@ -183,6 +183,11 @@ func serve(cfg *config.Config, seconds float64) error {
 	}
 	options := matchmake.Options{Public: cfg.IsPublic(), FillTimeout: cfg.FillTimeout,
 		RandomSessionKey: cfg.RandomSessionKey, LANPublic: os.Getenv("NEXLAB_LAN_PUBLIC")}
+	if cfg.WireGuardEnabled {
+		if subnet, parseErr := netip.ParsePrefix(cfg.WireGuardSubnet); parseErr == nil {
+			options.WireGuardSubnet = subnet
+		}
+	}
 	if nat != nil {
 		options.NAT = nat
 	}
@@ -255,16 +260,26 @@ func startWireGuard(cfg *config.Config, store *accounts.Store) (*wireguard.Manag
 	if err != nil {
 		return nil, err
 	}
+	nncs2IP, err := netip.ParseAddr(cfg.WireGuardNNCS2IP)
+	if err != nil {
+		nncs2IP = serverIP
+	}
+	ports := []int{cfg.AuthPort, cfg.SecurePort}
+	if cfg.Natcheck {
+		ports = append(ports, natcheck.Ports...)
+	}
 	mgr := wireguard.New(wireguard.Config{
-		Interface:      cfg.WireGuardInterface,
-		Endpoint:       cfg.WireGuardEndpoint,
-		Subnet:         subnet,
-		ServerIP:       serverIP,
-		ListenPort:     cfg.WireGuardListenPort,
-		PrivateKeyFile: cfg.WireGuardPrivateKeyFile,
-		EnableIPTables: cfg.WireGuardIPTables,
-		MTU:            cfg.WireGuardMTU,
-		Keepalive:      cfg.WireGuardKeepalive,
+		Interface:       cfg.WireGuardInterface,
+		Endpoint:        cfg.WireGuardEndpoint,
+		Subnet:          subnet,
+		ServerIP:        serverIP,
+		NNCS2IP:         nncs2IP,
+		ListenPort:      cfg.WireGuardListenPort,
+		PrivateKeyFile:  cfg.WireGuardPrivateKeyFile,
+		EnableIPTables:  cfg.WireGuardIPTables,
+		AllowedUDPPorts: ports,
+		MTU:             cfg.WireGuardMTU,
+		Keepalive:       cfg.WireGuardKeepalive,
 	}, nil)
 	if err := mgr.EnsureSetup(); err != nil {
 		return nil, err

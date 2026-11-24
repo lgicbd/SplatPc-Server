@@ -3,6 +3,7 @@ set -eu
 
 WG_IFACE="${WG_INTERFACE:-wg0}"
 WG_IP="${WG_SERVER_IP:-10.66.0.1}"
+WG_NNCS2="${WG_NNCS2_IP:-10.66.0.254}"
 WG_CIDR="${WG_SUBNET:-10.66.0.0/16}"
 WG_PREFIX_LEN="${WG_CIDR#*/}"
 WG_MTU_VAL="${WG_MTU:-1420}"
@@ -13,6 +14,9 @@ if ! ip link show "$WG_IFACE" >/dev/null 2>&1; then
 fi
 
 ip addr replace "${WG_IP}/${WG_PREFIX_LEN}" dev "$WG_IFACE"
+if [ "$WG_NNCS2" != "$WG_IP" ]; then
+    ip addr replace "${WG_NNCS2}/32" dev "$WG_IFACE"
+fi
 ip link set mtu "$WG_MTU_VAL" dev "$WG_IFACE"
 ip link set up dev "$WG_IFACE"
 

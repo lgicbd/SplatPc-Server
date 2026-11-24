@@ -3,6 +3,7 @@ package nex
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -63,6 +64,13 @@ func Start(options Options) (*Server, error) {
 		ipRate: limit.New(maxLoginsPerIP, rateWindow, nil), pidRate: limit.New(maxTicketsPerPID, rateWindow, nil)}
 	if options.AdvertiseLAN != "" {
 		authService.lanStation = strings.Replace(station, "address="+host+";", "address="+options.AdvertiseLAN+";", 1)
+	}
+	if cfg.WireGuardEnabled {
+		if subnet, err := netip.ParsePrefix(cfg.WireGuardSubnet); err == nil {
+			authService.wgSubnet = subnet
+			authService.wgStation = strings.Replace(station, "address="+host+";", "address="+cfg.WireGuardServerIP+";", 1)
+			authService.wgStrict = cfg.WireGuardStrict
+		}
 	}
 	var err error
 	s.auth, err = prudp.Listen(cfg.Listen, cfg.AuthPort, prudp.Options{AccessKey: AccessKey, IdleTimeout: options.IdleTimeout,

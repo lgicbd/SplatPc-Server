@@ -191,7 +191,8 @@ func (s *Server) clientIP(r *http.Request) string {
 		peer = r.RemoteAddr
 	}
 	peerAddr, peerErr := netip.ParseAddr(peer)
-	trustedPeer := peerErr == nil && (peerAddr.IsLoopback() || peerAddr.IsPrivate())
+	inWG := peerErr == nil && s.WG != nil && s.WG.Config().Subnet.Contains(peerAddr)
+	trustedPeer := peerErr == nil && !inWG && (peerAddr.IsLoopback() || peerAddr.IsPrivate())
 	if !s.BehindProxy || !trustedPeer {
 		return peer
 	}
@@ -568,7 +569,7 @@ func (s *Server) wgKey(payload map[string]any, ip string) (any, error) {
 	}
 
 	cfg := s.WG.Config()
-	peer, err := s.Accounts.AssignWGPeer(pid, pubKey, cfg.Subnet, cfg.ServerIP)
+	peer, err := s.Accounts.AssignWGPeer(pid, pubKey, cfg.Subnet, cfg.ServerIP, cfg.NNCS2IP)
 	if err != nil {
 		if accounts.IsInvalidIdentity(err) {
 			return nil, &social.Error{Status: http.StatusConflict, Message: err.Error()}
@@ -579,10 +580,15 @@ func (s *Server) wgKey(payload map[string]any, ip string) (any, error) {
 		return nil, err
 	}
 
+	nncs2IP := cfg.NNCS2IP
+	if !nncs2IP.IsValid() {
+		nncs2IP = cfg.ServerIP
+	}
 	reply := map[string]any{
 		"client_ip":            peer.AssignedIP,
 		"subnet":               cfg.Subnet.String(),
 		"server_ip":            cfg.ServerIP.String(),
+		"nncs2_ip":             nncs2IP.String(),
 		"server_public_key":    s.WG.ServerPublicKey(),
 		"endpoint":             cfg.Endpoint,
 		"allowed_ips":          cfg.Subnet.String(),

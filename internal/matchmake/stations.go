@@ -106,8 +106,9 @@ func (m *Matchmaker) register(c *rmc.Conn, urls []*station.URL, out *nexstream.W
 		host = known
 		m.fakeIPs[host] = true
 	}
+	inWG := m.options.WireGuardSubnet.IsValid() && m.options.WireGuardSubnet.Contains(source.Addr())
 	publicHost := host
-	if m.options.Public && m.options.LANPublic != "" && IsPrivate(host) {
+	if m.options.Public && m.options.LANPublic != "" && !inWG && IsPrivate(host) {
 		publicHost = m.options.LANPublic // behind the same router as the server: peers need the router's address
 	}
 	public.Set("address", publicHost)
@@ -128,8 +129,8 @@ func (m *Matchmaker) register(c *rmc.Conn, urls []*station.URL, out *nexstream.W
 	for _, url := range urls {
 		copied := url.Copy()
 		address := copied.Get("address")
-		// The game registers its local address: peers cannot use it, and PIA may prefer it.
-		if m.options.Public && (address == "" || address == "0.0.0.0" || strings.HasPrefix(address, "127.")) {
+		// Never leak a player's real LAN/loopback/public IP when inside WireGuard, or unroutable local IPs in public mode.
+		if inWG || (m.options.Public && (address == "" || address == "0.0.0.0" || IsPrivate(address))) {
 			copied.Set("address", host)
 		}
 		stations = append(stations, copied)
@@ -157,10 +158,12 @@ func (m *Matchmaker) handleReplaceURL(c *rmc.Conn, in *nexstream.Reader, _ *nexs
 	// On port and type: in public mode the stored address was rewritten. The list must keep 1 or 2
 	// URLs, or PIA refuses it.
 	replaced := false
+	inWG := m.options.WireGuardSubnet.IsValid() && m.options.WireGuardSubnet.Contains(c.RemoteAddr().Addr())
 	for i, old := range stations {
 		if old.Int("port") == url.Int("port") && old.Int("type") == url.Int("type") {
 			updated := replacement.Copy()
-			if m.options.Public && strings.HasPrefix(updated.Get("address"), "127.") {
+			addr := updated.Get("address")
+			if inWG || (m.options.Public && (addr == "" || addr == "0.0.0.0" || IsPrivate(addr))) {
 				updated.Set("address", c.RemoteAddr().Addr().String())
 			}
 			stations[i] = updated

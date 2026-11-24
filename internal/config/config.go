@@ -41,8 +41,8 @@ var (
 		"min_client_version", "random_session_key", "admin_token",
 		"integrity_mode", "integrity_releases",
 		"wireguard_enabled", "wireguard_interface", "wireguard_endpoint", "wireguard_subnet",
-		"wireguard_server_ip", "wireguard_listen_port", "wireguard_private_key_file",
-		"wireguard_iptables", "wireguard_mtu", "wireguard_keepalive"}
+		"wireguard_server_ip", "wireguard_nncs2_ip", "wireguard_listen_port", "wireguard_private_key_file",
+		"wireguard_iptables", "wireguard_strict", "wireguard_mtu", "wireguard_keepalive"}
 )
 
 // Error is a configuration value that is missing, out of range, or inconsistent.
@@ -84,9 +84,11 @@ type Config struct {
 	WireGuardEndpoint       string
 	WireGuardSubnet         string
 	WireGuardServerIP       string
+	WireGuardNNCS2IP        string
 	WireGuardListenPort     int
 	WireGuardPrivateKeyFile string
 	WireGuardIPTables       bool
+	WireGuardStrict         bool
 	WireGuardMTU            int
 	WireGuardKeepalive      int
 
@@ -379,6 +381,9 @@ func (c *Config) setWireGuard(values map[string]any) error {
 	if v, ok := values["wireguard_server_ip"]; ok && v != nil {
 		c.WireGuardServerIP = strings.TrimSpace(jsonval.Str(v))
 	}
+	if v, ok := values["wireguard_nncs2_ip"]; ok && v != nil {
+		c.WireGuardNNCS2IP = strings.TrimSpace(jsonval.Str(v))
+	}
 	var err error
 	if v, ok := values["wireguard_listen_port"]; ok && v != nil {
 		if c.WireGuardListenPort, err = port(v, "wireguard_listen_port"); err != nil {
@@ -394,6 +399,11 @@ func (c *Config) setWireGuard(values map[string]any) error {
 		c.WireGuardIPTables = jsonval.Truthy(v)
 	} else {
 		c.WireGuardIPTables = true
+	}
+	if v, ok := values["wireguard_strict"]; ok && v != nil {
+		c.WireGuardStrict = jsonval.Truthy(v)
+	} else {
+		c.WireGuardStrict = c.WireGuardEnabled
 	}
 	c.WireGuardMTU = 1420
 	if v, ok := values["wireguard_mtu"]; ok && v != nil {
@@ -431,6 +441,23 @@ func (c *Config) validateWireGuard() error {
 		return errorf("wireguard_server_ip: '%s' must be an IPv4 address inside %s", c.WireGuardServerIP, c.WireGuardSubnet)
 	}
 	c.WireGuardServerIP = serverIP.String()
+	if c.WireGuardNNCS2IP == "" {
+		raw := prefix.Masked().Addr().As4()
+		hostBits := 32 - prefix.Bits()
+		if hostBits >= 3 {
+			base := uint32(raw[0])<<24 | uint32(raw[1])<<16 | uint32(raw[2])<<8 | uint32(raw[3])
+			cand := base + (1 << hostBits) - 2
+			c.WireGuardNNCS2IP = netip.AddrFrom4([4]byte{byte(cand >> 24), byte(cand >> 16), byte(cand >> 8), byte(cand)}).String()
+		} else {
+			c.WireGuardNNCS2IP = c.WireGuardServerIP
+		}
+	} else {
+		nncs2IP, err := netip.ParseAddr(c.WireGuardNNCS2IP)
+		if err != nil || !nncs2IP.Is4() || !prefix.Contains(nncs2IP) {
+			return errorf("wireguard_nncs2_ip: '%s' must be an IPv4 address inside %s", c.WireGuardNNCS2IP, c.WireGuardSubnet)
+		}
+		c.WireGuardNNCS2IP = nncs2IP.String()
+	}
 	if c.WireGuardEndpoint == "" && c.StationHost() != "" {
 		c.WireGuardEndpoint = fmt.Sprintf("%s:%d", c.StationHost(), c.WireGuardListenPort)
 	}
@@ -543,7 +570,10 @@ func (c *Config) values() map[string]any {
 		"wireguard_enabled": c.WireGuardEnabled, "wireguard_interface": c.WireGuardInterface,
 		"wireguard_subnet": c.WireGuardSubnet, "wireguard_server_ip": c.WireGuardServerIP,
 		"wireguard_listen_port": c.WireGuardListenPort, "wireguard_iptables": c.WireGuardIPTables,
-		"wireguard_mtu": c.WireGuardMTU, "wireguard_keepalive": c.WireGuardKeepalive,
+		"wireguard_strict": c.WireGuardStrict, "wireguard_mtu": c.WireGuardMTU, "wireguard_keepalive": c.WireGuardKeepalive,
+	}
+	if c.WireGuardNNCS2IP != "" {
+		values["wireguard_nncs2_ip"] = c.WireGuardNNCS2IP
 	}
 	if c.RegistrationListen != "" {
 		values["registration_listen"] = c.RegistrationListen

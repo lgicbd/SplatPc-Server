@@ -15,6 +15,7 @@ services:
       - WG_INTERFACE=${WG_INTERFACE:-wg0}
       - WG_SUBNET=${WG_SUBNET:-10.66.0.0/16}
       - WG_SERVER_IP=${WG_SERVER_IP:-10.66.0.1}
+      - WG_NNCS2_IP=${WG_NNCS2_IP:-10.66.0.254}
       - WG_MTU=${WG_MTU:-1420}
     ports:
       - "60000:60000/udp"

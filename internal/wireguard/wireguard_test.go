@@ -60,8 +60,9 @@ func TestEnsureSetupAndPeerLifecycle(t *testing.T) {
 	keyFile := filepath.Join(dir, "wg_private.key")
 	runner := &fakeRunner{
 		fail: map[string]error{
-			"iptables -C FORWARD -j SPLAT_WG_FWD":          errors.New("not found"),
-			"iptables -C INPUT -i wg0 -j SPLAT_WG_BAN":     errors.New("not found"),
+			"iptables -C FORWARD -j SPLAT_WG_FWD":             errors.New("not found"),
+			"iptables -C INPUT -i wg0 -j SPLAT_WG_IN":         errors.New("not found"),
+			"iptables -C OUTPUT -o wg0 -j SPLAT_WG_BAN":       errors.New("not found"),
 			"iptables -C SPLAT_WG_BAN -s 10.66.0.2/32 -j DROP": errors.New("not found"),
 			"iptables -C SPLAT_WG_BAN -d 10.66.0.2/32 -j DROP": errors.New("not found"),
 			"iptables -D SPLAT_WG_BAN -s 10.66.0.2/32 -j DROP": errors.New("not found"),
@@ -70,13 +71,14 @@ func TestEnsureSetupAndPeerLifecycle(t *testing.T) {
 	}
 
 	mgr := New(Config{
-		Interface:      "wg0",
-		Endpoint:       "203.0.113.10:51820",
-		Subnet:         netip.MustParsePrefix("10.66.0.0/16"),
-		ServerIP:       netip.MustParseAddr("10.66.0.1"),
-		ListenPort:     51820,
-		PrivateKeyFile: keyFile,
-		EnableIPTables: true,
+		Interface:       "wg0",
+		Endpoint:        "203.0.113.10:51820",
+		Subnet:          netip.MustParsePrefix("10.66.0.0/16"),
+		ServerIP:        netip.MustParseAddr("10.66.0.1"),
+		ListenPort:      51820,
+		PrivateKeyFile:  keyFile,
+		EnableIPTables:  true,
+		AllowedUDPPorts: []int{60000, 60001, 10025, 10125},
 	}, runner)
 
 	if err := mgr.EnsureSetup(); err != nil {
@@ -91,8 +93,15 @@ func TestEnsureSetupAndPeerLifecycle(t *testing.T) {
 	if !runner.hasCall("wg set wg0 listen-port 51820 private-key " + keyFile) {
 		t.Fatalf("missing wg set call: %+v", runner.calls)
 	}
-	if !runner.hasCall("iptables -A SPLAT_WG_FWD -i wg0 -o wg0 -p udp -j ACCEPT") {
-		t.Fatalf("missing P2P UDP accept rule")
+	if !runner.hasCall("iptables -A SPLAT_WG_FWD -i wg0 -o wg0 -s 10.66.0.0/16 -d 10.66.0.0/16 -p udp -j ACCEPT") {
+		t.Fatalf("missing P2P UDP accept rule: %+v", runner.calls)
+	}
+	if !runner.hasCall("iptables -A SPLAT_WG_FWD -i wg0 ! -o wg0 -j DROP") {
+		t.Fatalf("missing WAN egress drop rule: %+v", runner.calls)
+	}
+	if !runner.hasCall("iptables -A SPLAT_WG_IN -i wg0 -p udp --dport 60000 -j ACCEPT") ||
+		!runner.hasCall("iptables -A SPLAT_WG_IN -i wg0 -j DROP") {
+		t.Fatalf("missing SPLAT_WG_IN lockdown rules: %+v", runner.calls)
 	}
 	if !runner.hasCall("iptables -I FORWARD 1 -j SPLAT_WG_FWD") {
 		t.Fatalf("missing FORWARD jump")

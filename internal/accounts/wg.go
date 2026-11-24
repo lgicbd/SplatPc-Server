@@ -25,7 +25,7 @@ type WGPeer struct {
 }
 
 // AssignWGPeer allocates (or updates the public key of) a WireGuard IP for pid inside subnet.
-func (s *Store) AssignWGPeer(pid uint32, publicKey string, subnet netip.Prefix, serverIP netip.Addr) (WGPeer, error) {
+func (s *Store) AssignWGPeer(pid uint32, publicKey string, subnet netip.Prefix, reserved ...netip.Addr) (WGPeer, error) {
 	if pid == 0 || pid > MaxPID {
 		return WGPeer{}, invalid("pid must be in 1..0x7fffffff")
 	}
@@ -82,7 +82,12 @@ func (s *Store) AssignWGPeer(pid uint32, publicKey string, subnet netip.Prefix, 
 		return WGPeer{}, err
 	}
 
-	used := map[netip.Addr]bool{serverIP: true}
+	used := map[netip.Addr]bool{}
+	for _, r := range reserved {
+		if r.IsValid() {
+			used[r] = true
+		}
+	}
 	rows, err := tx.Query(`SELECT assigned_ip FROM wg_peers`)
 	if err != nil {
 		return WGPeer{}, err

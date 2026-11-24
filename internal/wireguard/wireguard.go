@@ -22,6 +22,7 @@ import (
 const (
 	BanChain     = "SPLAT_WG_BAN"
 	ForwardChain = "SPLAT_WG_FWD"
+	InputChain   = "SPLAT_WG_IN"
 )
 
 // Runner executes external commands (wg, iptables, ip). Mocked in unit tests.
@@ -42,15 +43,17 @@ func (execRunner) Run(name string, args ...string) ([]byte, error) {
 
 // Config holds the WireGuard P2P server settings.
 type Config struct {
-	Interface      string
-	Endpoint       string
-	Subnet         netip.Prefix
-	ServerIP       netip.Addr
-	ListenPort     int
-	PrivateKeyFile string
-	EnableIPTables bool
-	MTU            int
-	Keepalive      int
+	Interface       string
+	Endpoint        string
+	Subnet          netip.Prefix
+	ServerIP        netip.Addr
+	NNCS2IP         netip.Addr
+	ListenPort      int
+	PrivateKeyFile  string
+	EnableIPTables  bool
+	AllowedUDPPorts []int
+	MTU             int
+	Keepalive       int
 }
 
 // Manager drives the WireGuard interface and iptables rules.
@@ -194,29 +197,56 @@ func (m *Manager) setupIPTablesLocked() error {
 	// Ensure custom chains exist (ignore error if they already exist).
 	_, _ = m.runner.Run("iptables", "-N", BanChain)
 	_, _ = m.runner.Run("iptables", "-N", ForwardChain)
+	_, _ = m.runner.Run("iptables", "-N", InputChain)
 
 	// Rebuild ForwardChain atomically-enough: flush then append rules.
 	if _, err := m.runner.Run("iptables", "-F", ForwardChain); err != nil {
 		return err
 	}
-	rules := [][]string{
+	subnet := m.cfg.Subnet.Masked().String()
+	fwdRules := [][]string{
 		{"-A", ForwardChain, "-i", iface, "-j", BanChain},
 		{"-A", ForwardChain, "-o", iface, "-j", BanChain},
-		{"-A", ForwardChain, "-i", iface, "-o", iface, "-p", "udp", "-j", "ACCEPT"},
-		{"-A", ForwardChain, "-i", iface, "-o", iface, "-p", "icmp", "-j", "ACCEPT"},
+		{"-A", ForwardChain, "-i", iface, "-o", iface, "-s", subnet, "-d", subnet, "-p", "udp", "-j", "ACCEPT"},
 		{"-A", ForwardChain, "-i", iface, "-o", iface, "-j", "DROP"},
 		{"-A", ForwardChain, "-i", iface, "!", "-o", iface, "-j", "DROP"},
+		{"-A", ForwardChain, "!", "-i", iface, "-o", iface, "-j", "DROP"},
 	}
-	for _, r := range rules {
+	for _, r := range fwdRules {
 		if _, err := m.runner.Run("iptables", r...); err != nil {
 			return err
 		}
 	}
 
+	// Rebuild InputChain: only allow game UDP ports from wg0, drop all TCP/HTTP/SSH/other services.
+	if _, err := m.runner.Run("iptables", "-F", InputChain); err != nil {
+		return err
+	}
+	if _, err := m.runner.Run("iptables", "-A", InputChain, "-i", iface, "-j", BanChain); err != nil {
+		return err
+	}
+	ports := m.cfg.AllowedUDPPorts
+	if len(ports) == 0 {
+		ports = []int{60000, 60001, 10025, 10125}
+	}
+	for _, p := range ports {
+		if p > 0 {
+			if _, err := m.runner.Run("iptables", "-A", InputChain, "-i", iface, "-p", "udp", "--dport", fmt.Sprint(p), "-j", "ACCEPT"); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := m.runner.Run("iptables", "-A", InputChain, "-i", iface, "-j", "DROP"); err != nil {
+		return err
+	}
+
 	if err := m.ensureJumpLocked("FORWARD", "-j", ForwardChain); err != nil {
 		return err
 	}
-	if err := m.ensureJumpLocked("INPUT", "-i", iface, "-j", BanChain); err != nil {
+	if err := m.ensureJumpLocked("INPUT", "-i", iface, "-j", InputChain); err != nil {
+		return err
+	}
+	if err := m.ensureJumpLocked("OUTPUT", "-o", iface, "-j", BanChain); err != nil {
 		return err
 	}
 	return nil
